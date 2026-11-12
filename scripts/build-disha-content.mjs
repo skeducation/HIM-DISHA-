@@ -6,6 +6,26 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let lastRequestAt = 0;
 let blockedUntil = 0;
 const MIN_GAP_MS = 500;
+let requestQueue = Promise.resolve();
+let progressQueue = Promise.resolve();
+async function scheduleRequest() {
+  const scheduled = requestQueue.then(async () => {
+    await scheduleRequest();
+  });
+  requestQueue = scheduled.catch(() => {});
+  await scheduled;
+}
+async function persistProgress() {
+  const totals = Object.values(result.batches).reduce((sum, item) => ({
+    batches: sum.batches + 1,
+    subjects: sum.subjects + (item.subjects || []).length,
+    videos: sum.videos + (item.totals?.videos || 0),
+    pdfs: sum.pdfs + (item.totals?.pdfs || 0)
+  }), { batches: 0, subjects: 0, videos: 0, pdfs: 0 });
+  const snapshot = JSON.stringify({ ...result, totals });
+  progressQueue = progressQueue.then(() => writeFile("public/disha-content.json", snapshot));
+  await progressQueue;
+}
 
 function rows(value) {
   if (Array.isArray(value)) return value;
@@ -230,15 +250,7 @@ async function batchWorker(workerId) {
       console.warn("Batch content failed after retries", batchId, error.message);
     }
     // Persist progress so the workflow can still publish completed batches.
-    await writeFile("public/disha-content.json", JSON.stringify({
-      ...result,
-      totals: Object.values(result.batches).reduce((sum, item) => ({
-        batches: sum.batches + 1,
-        subjects: sum.subjects + (item.subjects || []).length,
-        videos: sum.videos + (item.totals?.videos || 0),
-        pdfs: sum.pdfs + (item.totals?.pdfs || 0)
-      }), { batches: 0, subjects: 0, videos: 0, pdfs: 0 })
-    }));
+    await persistProgress();
   }
 }
 await Promise.all([batchWorker(1), batchWorker(2)]);
