@@ -3,6 +3,86 @@ import React, { useEffect, useMemo, useState } from "react";
 const BASE = import.meta.env.BASE_URL;
 const API_URL = "https://hrrydoc.vercel.app/api/disha/batches";
 const TELEGRAM_URL = "https://t.me/HIMAPPS";
+const DishaAPI = "https://hrrydoc.vercel.app";
+const apiRows = value => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  for (const key of ["data","subjects","chapters","items","results","folders","lectures","pdfs","subFolders","list","records"]) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  for (const key of ["result","payload"]) if (value[key] && typeof value[key] === "object") {
+    const found = apiRows(value[key]); if (found.length) return found;
+  }
+  return [];
+};
+const apiId = x => String(x?.id ?? x?.folder_id ?? x?.folderId ?? x?.chapter_id ?? x?.subject_id ?? x?.lecture_id ?? x?.file_id ?? "");
+const apiTitle = x => String(x?.title ?? x?.Title ?? x?.name ?? x?.subject_name ?? x?.topic_name ?? x?.file_name ?? "Untitled");
+async function apiGet(path) {
+  const response = await fetch(DishaAPI + path, { headers: { Accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) throw new Error("API HTTP " + response.status);
+  const json = await response.json();
+  if (json?.success === false) throw new Error(json.error || json.message || "API error");
+  return json;
+}
+async function decodeAppx(value) {
+  if (!value || typeof value !== "string" || !value.includes(":") || value.startsWith("http")) return String(value || "").trim();
+  try {
+    const [cipher, iv] = value.split(":");
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("638udh3829162018"), { name: "AES-CBC" }, false, ["decrypt"]);
+    const bytes = Uint8Array.from(atob(cipher), ch => ch.charCodeAt(0));
+    const ivBytes = Uint8Array.from(atob(iv), ch => ch.charCodeAt(0));
+    return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBytes }, key, bytes)).trim();
+  } catch { return ""; }
+}
+const ytId = value => {
+  const s = String(value || "").trim();
+  if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
+  return s.match(/(?:v=|youtu\\.be\\/|embed\\/|live\\/|shorts\\/)([A-Za-z0-9_-]{11})/)?.[1] || "";
+};
+async function normalizeApiResource(item, kind) {
+  const links = Array.isArray(item?.encrypted_links) ? item.encrypted_links : [];
+  const qualities = [];
+  let streamUrl = "", downloadUrl = "", videoId = "";
+  for (const link of links) {
+    const url = await decodeAppx(link.path) || await decodeAppx(link.backup_url);
+    if (/^https?:\\/\\//i.test(url) && !/\\/hls-drm-/i.test(url)) {
+      qualities.push({ quality: String(link.quality || "Auto"), url }); streamUrl ||= url;
+    }
+  }
+  for (const key of ["download_link","download_link2","download_url_higher_version","download_url_lower_version","recording_hls","file_link"]) {
+    const url = await decodeAppx(item?.[key]); if (!url) continue;
+    const id = ytId(url); if (id) videoId ||= id;
+    else if (/^https?:\\/\\//i.test(url) && !/\\/hls-drm-/i.test(url)) {
+      if (key === "download_link" && !/\\.m3u8(?:$|\\?)/i.test(url)) downloadUrl ||= url;
+      streamUrl ||= url; if (!qualities.some(q => q.url === url)) qualities.push({ quality: "Direct", url });
+    }
+  }
+  videoId ||= ytId(item?.video_id) || ytId(streamUrl);
+  const token = String(item?.video_player_token || "").trim();
+  const playerUrl = token && token !== "1234" ? "https://appx-play.classx.co.in/combined-img-player?isMobile=true&token=" + encodeURIComponent(token) : "";
+  const pdf = await decodeAppx(item?.pdfUrl || item?.pdf_url || item?.pdf_link || item?.file_link || item?.download_link || "");
+  return {
+    ...item, id: apiId(item), title: apiTitle(item), kind,
+    streamUrl: item?.streamUrl || item?.stream_url || item?.url || streamUrl,
+    downloadUrl: item?.downloadUrl || item?.download_url || downloadUrl || (kind === "pdf" ? pdf : ""),
+    embedUrl: item?.embedUrl || item?.embed_url || item?.playerUrl || item?.player_url || (videoId ? "https://www.youtube.com/embed/" + videoId + "?playsinline=1&rel=0" : playerUrl),
+    videoId, qualities, pdfUrl: pdf
+  };
+}
+async function loadFolderTree(batchId, subjectId, chapterId, depth = 0, seen = new Set()) {
+  if (!chapterId || depth > 10 || seen.has(String(chapterId))) return { id: chapterId, folders: [], videos: [], pdfs: [] };
+  seen.add(String(chapterId));
+  const q = new URLSearchParams({ batchId, subjectId, chapterId });
+  const response = await apiGet("/api/disha/lectures?" + q);
+  const data = response?.data && typeof response.data === "object" ? response.data : response;
+  const videosRaw = Array.isArray(response?.lectures) ? response.lectures : apiRows(data?.lectures);
+  const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : apiRows(data?.pdfs);
+  const children = Array.isArray(response?.subFolders) ? response.subFolders : apiRows(data?.subFolders);
+  const folders = await Promise.all(children.map(async child => ({ id: apiId(child), title: apiTitle(child), ...await loadFolderTree(batchId, subjectId, apiId(child), depth + 1, seen) })));
+  const videos = await Promise.all(videosRaw.map(item => normalizeApiResource(item, "video")));
+  const pdfs = await Promise.all(pdfsRaw.map(item => normalizeApiResource(item, "pdf")));
+  return { id: chapterId, folders, videos: videos.filter(x => x.id), pdfs: pdfs.filter(x => x.id || x.pdfUrl) };
+}
 const first = (...values) => values.find(value => value !== undefined && value !== null && value !== "");
 const txt = (value, fallback = "") => typeof value === "string" || typeof value === "number" ? String(value) : fallback;
 const title = item => txt(first(item?.title, item?.name, item?.batchName, item?.batch_name, item?.label), "Untitled");
@@ -114,7 +194,21 @@ export default function App() {
     if (activeSubject) { setActiveSubject(null); return; }
     setActiveBatch(null); setView("home");
   };
-  const openChapter = chapter => { setActiveChapter(chapter); setFolderStack([chapter]); setTab("videos"); };
+  const openChapter = async chapter => {
+    setActiveChapter({ ...chapter, folders: [], videos: [], pdfs: [] }); setFolderStack([]); setTab("videos"); setResourcesLoading(true);
+    try {
+      const batch = String(first(activeBatch?.id, activeBatch?.batch_id, activeBatch?.course_id, activeBatch?.batchId, ""));
+      const subject = String(first(activeSubject?.id, activeSubject?.subject_id, ""));
+      const q = new URLSearchParams({ batchId: batch, subjectId: subject });
+      const response = await apiGet("/api/disha/chapters?" + q);
+      const chapterRows = apiRows(response?.data ?? response);
+      const actual = chapterRows.find(x => apiId(x) === apiId(chapter)) || chapter;
+      const tree = await loadFolderTree(batch, subject, apiId(chapter));
+      const full = { ...actual, ...tree, id: apiId(chapter), title: apiTitle(chapter) };
+      setActiveChapter(full); setFolderStack([full]);
+    } catch (e) { setActiveChapter({ ...chapter, folders: [], videos: [], pdfs: [], loadError: e.message }); setFolderStack([]); }
+    finally { setResourcesLoading(false); }
+  };
   const openFolder = folder => setFolderStack(stack => [...stack, folder]);
   const openItem = item => {
     if (isPdf(item)) {
@@ -180,7 +274,7 @@ export default function App() {
             <span className="folder-icon"><Icon name="folder" /></span>
             <span><b>{title(subject)}</b><small>{(subject.chapters || []).length} chapters</small></span><span className="go">›</span>
           </button>)}
-          {contentReady && !subjects.length && <div className="empty">{contentData?.errors?.[batchId] || "इस batch के subjects API से नहीं मिले। Refresh कुछ देर बाद करें।"}</div>}
+          {!resourcesLoading && !subjects.length && <div className="empty">{error || "इस batch के subjects API से नहीं मिले। Refresh करके दोबारा कोशिश करें।"}</div>}
         </div>}
 
         {activeBatch && activeSubject && !activeChapter && <div className="folder-list">
