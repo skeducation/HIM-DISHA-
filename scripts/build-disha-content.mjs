@@ -109,6 +109,7 @@ function videoInfo(item) {
 
 function normalizeResource(item, kind) {
   const video = kind === "video";
+  const derived = video ? videoInfo(item) : {};
   return {
     id: id(item),
     title: title(item),
