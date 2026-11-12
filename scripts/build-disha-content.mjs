@@ -1,69 +1,193 @@
 import { readFile, writeFile } from "node:fs/promises";
+
 const API = "https://hrrydoc.vercel.app";
-const wait = ms => new Promise(r => setTimeout(r, ms));
-async function get(path) {
-  let error;
-  for (let n=1;n<=4;n++) {
-    try {
-      const r=await fetch(API+path,{headers:{Accept:"application/json"},cache:"no-store"});
-      const raw=await r.text(); const j=JSON.parse(raw);
-      if(!r.ok || j?.success===false) throw new Error(j?.message||j?.error||("HTTP "+r.status));
-      return j;
-    } catch(e) { error=e; if(n<4) await wait(n*650); }
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let lastRequestAt = 0;
+
+function rows(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  for (const key of ["data","subjects","chapters","items","results","folders","lectures","pdfs","subFolders","list","records"]) {
+    if (Array.isArray(value[key])) return value[key];
   }
-  throw error;
+  for (const key of ["data","result","payload"]) {
+    if (value[key] && typeof value[key] === "object") {
+      const found = rows(value[key]);
+      if (found.length) return found;
+    }
+  }
+  return [];
 }
-const arr=x=>Array.isArray(x)?x:Array.isArray(x?.data)?x.data:[];
-const id=x=>String(x?.id??x?.folder_id??x?.chapter_id??x?.subject_id??"");
-const title=x=>String(x?.title??x?.name??x?.Title??x?.subject_name??"Untitled");
-async function parallel(xs,fn,limit=3){
-  let i=0; const out=new Array(xs.length);
-  await Promise.all(Array.from({length:Math.min(limit,xs.length)},async()=>{
-    while(i<xs.length){const n=i++;try{out[n]=await fn(xs[n]);}catch(e){out[n]={_error:e.message};}await wait(100);}
-  }));
-  return out.filter(x=>x&&!x._error);
+const id = x => String(x?.id ?? x?.folder_id ?? x?.folderId ?? x?.chapter_id ?? x?.subject_id ?? x?.lecture_id ?? x?.file_id ?? "");
+const title = x => String(x?.title ?? x?.Title ?? x?.name ?? x?.subject_name ?? x?.topic_name ?? x?.file_name ?? "Untitled");
+const first = (...values) => values.find(v => v !== undefined && v !== null && v !== "");
+
+async function get(path) {
+  let lastError;
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    const gap = 1100 - (Date.now() - lastRequestAt);
+    if (gap > 0) await sleep(gap);
+    lastRequestAt = Date.now();
+    try {
+      const response = await fetch(API + path, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        signal: AbortSignal.timeout(25000)
+      });
+      const raw = await response.text();
+      let json;
+      try { json = JSON.parse(raw); } catch { throw new Error("Non-JSON response (HTTP " + response.status + "): " + raw.slice(0,120)); }
+      if (!response.ok || json?.success === false) {
+        const message = json?.error || json?.message || ("HTTP " + response.status);
+        const error = new Error(String(message));
+        error.status = response.status;
+        error.retryAfter = Number(response.headers.get("retry-after") || 0);
+        throw error;
+      }
+      return json;
+    } catch (error) {
+      lastError = error;
+      const rateLimited = error.status === 429 || /429|rate.?limit|too many requests/i.test(error.message || "");
+      if (attempt === 7) break;
+      const delay = rateLimited
+        ? Math.max(error.retryAfter * 1000, Math.min(60000, 9000 * attempt))
+        : Math.min(12000, 1800 * attempt);
+      console.warn("Retry API", path, "attempt", attempt, "after", delay, "ms:", error.message);
+      await sleep(delay);
+    }
+  }
+  throw lastError || new Error("API request failed");
 }
-function resource(x,kind){return {
- id:String(x?.id??x?.lecture_id??x?.file_id??""),title:title(x),duration:String(x?.duration??""),
- thumbnail:String(x?.thumbnail??""),kind,
- streamUrl:String(x?.streamUrl??x?.stream_url??""),embedUrl:String(x?.embedUrl??x?.embed_url??""),
- videoId:String(x?.videoId??x?.video_id??""),qualities:Array.isArray(x?.qualities)?x.qualities:[],
- pdfUrl:String(x?.pdfUrl??x?.pdf_url??x?.pdf_link??x?.file_link??""),pdfKey:String(x?.pdfKey??x?.pdf_key??"")
-};}
-async function folder(batchId,subjectId,chapterId,seen,depth=0){
- const key=batchId+":"+chapterId;
- if(seen.has(key)||depth>9||seen.size>1200)return {id:chapterId,folders:[],videos:[],pdfs:[]};
- seen.add(key);
- const q=new URLSearchParams({batchId,subjectId,chapterId});
- const j=await get("/api/disha/lectures?"+q);
- const videos=Array.isArray(j.lectures)?j.lectures:arr(j.data?.lectures);
- const pdfs=Array.isArray(j.pdfs)?j.pdfs:arr(j.data?.pdfs);
- const children=Array.isArray(j.subFolders)?j.subFolders:arr(j.data?.subFolders);
- const folders=await parallel(children,async f=>{
-  const fid=id(f); if(!fid)return null;
-  return {id:fid,title:title(f),...(await folder(batchId,subjectId,fid,seen,depth+1))};
- });
- return {id:chapterId,folders,videos:videos.map(x=>resource(x,"video")).filter(x=>x.id),pdfs:pdfs.map(x=>resource(x,"pdf")).filter(x=>x.id||x.pdfUrl)};
+
+function normalizeResource(item, kind) {
+  const video = kind === "video";
+  return {
+    id: id(item),
+    title: title(item),
+    duration: String(item?.duration ?? ""),
+    thumbnail: String(first(item?.thumbnail, item?.image, item?.image_url, "")),
+    kind,
+    streamUrl: String(first(item?.streamUrl, item?.stream_url, item?.url, "")),
+    embedUrl: String(first(item?.embedUrl, item?.embed_url, item?.playerUrl, item?.player_url, "")),
+    videoId: String(first(item?.videoId, item?.video_id, "")),
+    qualities: Array.isArray(item?.qualities) ? item.qualities : [],
+    pdfUrl: String(first(item?.pdfUrl, item?.pdf_url, item?.pdf_link, item?.file_link, item?.download_link, "")),
+    pdfKey: String(first(item?.pdfKey, item?.pdf_key, item?.pdf_encryption_key, item?.file_key, "")),
+    raw: item
+  };
 }
-async function build(batch){
- const batchId=String(batch.id??batch.batch_id??batch.course_id??"");
- const subjects=await parallel(arr(await get("/api/disha/subjects?"+new URLSearchParams({batchId}))),async s=>{
-  const subjectId=id(s); if(!subjectId)return null;
-  const chapters=await parallel(arr(await get("/api/disha/chapters?"+new URLSearchParams({batchId,subjectId}))),async c=>{
-   const chapterId=id(c); if(!chapterId)return null;
-   return {id:chapterId,title:title(c),...(await folder(batchId,subjectId,chapterId,new Set()))};
-  });
-  return {id:subjectId,title:title(s),chapters};
- });
- return {subjects};
+
+async function enrichVideo(batchId, subjectId, chapterId, item) {
+  const out = normalizeResource(item, "video");
+  if (out.streamUrl || out.embedUrl || out.videoId) return out;
+  const lectureId = out.id;
+  if (!lectureId) return out;
+  try {
+    const query = new URLSearchParams({ batchId, subjectId, chapterId, lectureId });
+    const detail = await get("/api/disha/video?" + query);
+    const data = detail?.data || detail?.video || detail;
+    return { ...out, ...normalizeResource({ ...item, ...data }, "video"), raw: { ...item, ...data } };
+  } catch (error) {
+    console.warn("Video detail unavailable", batchId, lectureId, error.message);
+    return out;
+  }
 }
-const source=JSON.parse(await readFile("public/disha-batches.json","utf8"));
-const batches=arr(source), result={success:true,generatedAt:new Date().toISOString(),batches:{},errors:{}};
-for(const b of batches){
- const id=String(b.id??b.batch_id??b.course_id??""); if(!id)continue;
- try { console.log("Fetching Disha content",id); result.batches[id]=await build(b); console.log("Subjects",id,result.batches[id].subjects.length); }
- catch(e){result.batches[id]={subjects:[]};result.errors[id]=e.message;console.warn("Batch content failed",id,e.message);}
- await wait(300);
+
+async function walkFolder(batchId, subjectId, chapterId, seen, depth = 0) {
+  const key = batchId + ":" + subjectId + ":" + chapterId;
+  if (!chapterId || seen.has(key) || depth > 10 || seen.size > 1800) {
+    return { id: chapterId, folders: [], videos: [], pdfs: [] };
+  }
+  seen.add(key);
+  const query = new URLSearchParams({ batchId, subjectId, chapterId });
+  const response = await get("/api/disha/lectures?" + query);
+  const data = response?.data && typeof response.data === "object" ? response.data : response;
+  const videosRaw = Array.isArray(response?.lectures) ? response.lectures : rows(data?.lectures);
+  const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : rows(data?.pdfs);
+  const children = Array.isArray(response?.subFolders) ? response.subFolders : rows(data?.subFolders);
+  const folders = [];
+  for (const child of children) {
+    const childId = id(child);
+    if (!childId) continue;
+    try {
+      const nested = await walkFolder(batchId, subjectId, childId, seen, depth + 1);
+      folders.push({ id: childId, title: title(child), ...nested });
+    } catch (error) {
+      console.warn("Folder load failed", batchId, childId, error.message);
+      folders.push({ id: childId, title: title(child), folders: [], videos: [], pdfs: [], loadError: error.message });
+    }
+  }
+  const videos = [];
+  for (const item of videosRaw) {
+    const enriched = await enrichVideo(batchId, subjectId, chapterId, item);
+    if (enriched.id) videos.push(enriched);
+  }
+  const pdfs = pdfsRaw.map(item => normalizeResource(item, "pdf")).filter(item => item.id || item.pdfUrl || item.pdfKey);
+  return { id: chapterId, folders, videos, pdfs };
 }
-await writeFile("public/disha-content.json",JSON.stringify(result));
-console.log("Disha content snapshot complete",Object.keys(result.batches).length,"batches");
+
+async function buildBatch(batch) {
+  const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
+  const subjectResponse = await get("/api/disha/subjects?" + new URLSearchParams({ batchId }));
+  const subjectRows = rows(subjectResponse?.data ?? subjectResponse);
+  const subjects = [];
+  for (const subject of subjectRows) {
+    const subjectId = id(subject);
+    if (!subjectId) continue;
+    const chapterResponse = await get("/api/disha/chapters?" + new URLSearchParams({ batchId, subjectId }));
+    const chapterRows = rows(chapterResponse?.data ?? chapterResponse);
+    const chapters = [];
+    for (const chapter of chapterRows) {
+      const chapterId = id(chapter);
+      if (!chapterId) continue;
+      try {
+        const content = await walkFolder(batchId, subjectId, chapterId, new Set());
+        chapters.push({ id: chapterId, title: title(chapter), ...content });
+      } catch (error) {
+        console.warn("Chapter load failed", batchId, chapterId, error.message);
+        chapters.push({ id: chapterId, title: title(chapter), folders: [], videos: [], pdfs: [], loadError: error.message });
+      }
+    }
+    subjects.push({ id: subjectId, title: title(subject), chapters });
+  }
+  const totals = subjects.reduce((sum, subject) => {
+    for (const chapter of subject.chapters) {
+      const count = node => {
+        sum.videos += (node.videos || []).length;
+        sum.pdfs += (node.pdfs || []).length;
+        (node.folders || []).forEach(count);
+      };
+      count(chapter);
+    }
+    return sum;
+  }, { videos: 0, pdfs: 0 });
+  console.log("Batch complete", batchId, "subjects", subjects.length, "videos", totals.videos, "pdfs", totals.pdfs);
+  return { subjects, totals };
+}
+
+const source = JSON.parse(await readFile("public/disha-batches.json", "utf8"));
+const batches = rows(source?.data ?? source);
+const result = { success: true, generatedAt: new Date().toISOString(), batches: {}, errors: {} };
+for (const batch of batches) {
+  const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
+  if (!batchId) continue;
+  console.log("Fetching Disha content", batchId);
+  try {
+    result.batches[batchId] = await buildBatch(batch);
+  } catch (error) {
+    result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
+    result.errors[batchId] = error.message;
+    console.warn("Batch content failed after retries", batchId, error.message);
+  }
+  await sleep(1500);
+}
+const totals = Object.values(result.batches).reduce((sum, batch) => {
+  sum.subjects += (batch.subjects || []).length;
+  sum.videos += batch.totals?.videos || 0;
+  sum.pdfs += batch.totals?.pdfs || 0;
+  return sum;
+}, { subjects: 0, videos: 0, pdfs: 0 });
+result.totals = { batches: Object.keys(result.batches).length, ...totals, failedBatches: Object.keys(result.errors).length };
+await writeFile("public/disha-content.json", JSON.stringify(result));
+console.log("Disha content snapshot complete", JSON.stringify(result.totals));
+if (result.totals.failedBatches === batches.length) throw new Error("No batch resources could be loaded; refusing to publish an empty snapshot.");

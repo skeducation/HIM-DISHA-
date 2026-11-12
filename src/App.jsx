@@ -1,227 +1,233 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+const BASE = import.meta.env.BASE_URL;
 const API_URL = "https://hrrydoc.vercel.app/api/disha/batches";
 const TELEGRAM_URL = "https://t.me/HIMAPPS";
-
-const first = (...values) => values.find(v => v !== undefined && v !== null && v !== "");
-const text = (v, fallback = "") => typeof v === "string" || typeof v === "number" ? String(v) : fallback;
-const getTitle = x => text(first(x?.title, x?.name, x?.batchName, x?.batch_name, x?.label), "Untitled");
-const cleanUrl = value => {
-  if (typeof value !== "string") return "";
-  const s = value.trim();
-  const md = s.match(/^\[(.*?)\]\((https?:\/\/[^)]+)\)$/);
-  return (md ? md[2] : s).replace(/&amp;/g, "&");
-};
-const getImage = x => cleanUrl(first(x?.banner, x?.bannerUrl, x?.banner_url, x?.image, x?.imageUrl, x?.image_url, x?.thumbnail, x?.thumbnailUrl, x?.cover));
-const getUrl = x => first(x?.url, x?.link, x?.fileUrl, x?.file_url, x?.pdfUrl, x?.pdf_url, x?.videoUrl, x?.video_url, x?.src, x?.downloadUrl);
-const isPdf = x => /pdf/i.test([x?.type, x?.kind, x?.mimeType, x?.mime_type, x?.format, getUrl(x)].filter(Boolean).join(" "));
-const isVideo = x => /video|mp4|m3u8|webm/i.test([x?.type, x?.kind, x?.mimeType, x?.mime_type, x?.format, getUrl(x)].filter(Boolean).join(" "));
-const isMedia = x => isPdf(x) || isVideo(x) || Boolean(getUrl(x));
-const listFrom = data => {
-  if (Array.isArray(data)) return data;
-  if (!data || typeof data !== "object") return [];
+const first = (...values) => values.find(value => value !== undefined && value !== null && value !== "");
+const txt = (value, fallback = "") => typeof value === "string" || typeof value === "number" ? String(value) : fallback;
+const title = item => txt(first(item?.title, item?.name, item?.batchName, item?.batch_name, item?.label), "Untitled");
+const listFrom = value => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
   for (const key of ["batches", "data", "results", "items", "courses", "payload"]) {
-    const value = data[key];
-    if (Array.isArray(value)) return value;
-    if (value && typeof value === "object") {
-      const nested = listFrom(value);
+    if (Array.isArray(value[key])) return value[key];
+    if (value[key] && typeof value[key] === "object") {
+      const nested = listFrom(value[key]);
       if (nested.length) return nested;
     }
   }
   return [];
 };
-const collectContent = batch => {
-  const out = [];
-  const seen = new Set();
-  const walk = (value, depth = 0) => {
-    if (!value || depth > 5) return;
-    if (Array.isArray(value)) { value.forEach(v => walk(v, depth + 1)); return; }
-    if (typeof value !== "object") return;
-    if (isMedia(value)) {
-      const url = getUrl(value);
-      if (url && !seen.has(url)) { seen.add(url); out.push(value); }
-    }
-    for (const key of ["chapters", "sections", "modules", "lessons", "contents", "content", "videos", "pdfs", "resources", "topics", "subjects", "items", "files"]) {
-      if (value[key]) walk(value[key], depth + 1);
-    }
-  };
-  walk(batch);
-  return out;
+const isPdf = item => String(item?.kind || item?.type || "").toLowerCase() === "pdf" || Boolean(item?.pdfUrl || item?.pdf_url || item?.pdfKey);
+const isVideo = item => String(item?.kind || item?.type || "").toLowerCase() === "video" || Boolean(item?.streamUrl || item?.embedUrl || item?.videoId);
+const cleanUrl = value => {
+  if (typeof value !== "string") return "";
+  const match = value.trim().match(/^\[(.*?)\]\((https?:\/\/[^)]+)\)$/);
+  return (match ? match[2] : value.trim()).replace(/&amp;/g, "&");
 };
-const Icon = ({ name, size = 20 }) => {
-  const paths = {
-    search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
-    book: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21z"/><path d="M4 5.5v13A2.5 2.5 0 0 1 6.5 16H20"/></>,
-    play: <path d="m8 5 12 7-12 7z" fill="currentColor" stroke="none"/>,
-    file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8"/></>,
-    download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></>,
-    arrow: <><path d="M7 17 17 7M7 7h10v10"/></>,
-    close: <><path d="m18 6-12 12M6 6l12 12"/></>,
-    menu: <><path d="M4 6h16M4 12h16M4 18h16"/></>,
-    layers: <><path d="m12 2 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/></>,
-    shield: <><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11"/><path d="m9 12 2 2 4-4"/></>
-  };
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.book}</svg>;
+const imageOf = item => cleanUrl(first(item?.thumbnail, item?.thumbnailUrl, item?.thumbnail_url, item?.banner, item?.image, item?.imageUrl, ""));
+const countTree = node => {
+  let videos = (node?.videos || []).length, pdfs = (node?.pdfs || []).length;
+  (node?.folders || []).forEach(folder => { const n = countTree(folder); videos += n.videos; pdfs += n.pdfs; });
+  return { videos, pdfs };
+};
+const Icon = ({ name }) => {
+  const icons = { home:"⌂", mine:"▣", dev:"✧", folder:"▰", file:"▤", video:"▶", back:"‹", search:"⌕", close:"✕" };
+  return <span aria-hidden="true">{icons[name] || "•"}</span>;
 };
 
-function App() {
+export default function App() {
   const [batches, setBatches] = useState([]);
+  const [contentData, setContentData] = useState(null);
+  const [contentReady, setContentReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [group, setGroup] = useState("all");
+  const [view, setView] = useState("home");
   const [activeBatch, setActiveBatch] = useState(null);
-  const [contentData, setContentData] = useState(null);
   const [activeSubject, setActiveSubject] = useState(null);
   const [activeChapter, setActiveChapter] = useState(null);
   const [folderStack, setFolderStack] = useState([]);
-  const [filter, setFilter] = useState("all");
+  const [tab, setTab] = useState("videos");
   const [player, setPlayer] = useState(null);
-  const [telegramOpen, setTelegramOpen] = useState(false);
-  const [mobileMenu, setMobileMenu] = useState(false);
 
-  const loadBatches = async () => {
+  const load = async () => {
     setLoading(true); setError("");
     try {
-      // GitHub Pages cannot proxy third-party APIs. Prefer the build-time same-origin
-      // snapshot generated by Actions, then fall back to the live endpoint.
-      let json = null;
-      let sourceError = "";
-      const snapshotUrl = import.meta.env.BASE_URL + "disha-batches.json";
-      for (const url of [snapshotUrl, API_URL]) {
-        try {
-          const response = await fetch(url, { method: "GET", headers: { Accept: "application/json" }, cache: "no-store" });
-          if (!response.ok) throw new Error("HTTP " + response.status);
-          const raw = await response.text();
-          const parsed = JSON.parse(raw);
-          if (parsed?.success === false) throw new Error(text(parsed.message || parsed.error, "API request failed"));
-          const rows = listFrom(parsed?.data ?? parsed);
-          if (!rows.length) throw new Error("response mein batch list nahi mili");
-          json = rows;
-          break;
-        } catch (e) {
-          sourceError = (e?.message || "Network error") + " (" + url + ")";
-        }
+      const response = await fetch(BASE + "disha-batches.json", { cache: "no-store" });
+      if (!response.ok) throw new Error("Batch snapshot HTTP " + response.status);
+      const json = await response.json();
+      const rows = listFrom(json?.data ?? json);
+      if (!rows.length) throw new Error("Batches API returned an empty list");
+      setBatches(rows);
+    } catch (snapshotError) {
+      try {
+        const response = await fetch(API_URL, { headers: { Accept: "application/json" }, cache: "no-store" });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const json = await response.json();
+        const rows = listFrom(json?.data ?? json);
+        if (!rows.length) throw new Error("Empty batch list");
+        setBatches(rows);
+      } catch (liveError) {
+        setError("Batches load नहीं हुए: " + (liveError?.message || snapshotError.message));
       }
-      if (!json) throw new Error(sourceError || "API se batch list nahi mili");
-      setBatches(json);
-    } catch (e) {
-      setError("API se batches load nahi hue. " + (e?.message || "Network/CORS error") + ". Retry karke dekhein.");
     } finally { setLoading(false); }
   };
 
   useEffect(() => {
-    loadBatches();
-    fetch(import.meta.env.BASE_URL + "disha-content.json", { cache: "no-store" })
-      .then(r => r.ok ? r.json() : Promise.reject(new Error("Content snapshot not ready")))
-      .then(setContentData).catch(e => console.warn("Disha content snapshot:", e.message));
-  }, []);
-  useEffect(() => {
-    if (sessionStorage.getItem("himdisha-telegram-dismissed")) return;
-    const timer = window.setTimeout(() => setTelegramOpen(true), 9000);
-    return () => window.clearTimeout(timer);
+    load();
+    fetch(BASE + "disha-content.json", { cache: "no-store" })
+      .then(response => { if (!response.ok) throw new Error("Content snapshot HTTP " + response.status); return response.json(); })
+      .then(setContentData)
+      .catch(error => console.warn("Resources snapshot:", error.message))
+      .finally(() => setContentReady(true));
   }, []);
 
-  const visibleBatches = useMemo(() => batches.filter(b => getTitle(b).toLowerCase().includes(query.toLowerCase())), [batches, query]);
-  const batchId = activeBatch ? String(first(activeBatch.id, activeBatch.batch_id, activeBatch.course_id, activeBatch.batchId)) : "";
+  const visibleBatches = useMemo(() => batches.filter(batch => {
+    const matchesText = title(batch).toLowerCase().includes(query.toLowerCase());
+    const groupText = String(first(batch?.group, batch?.class, batch?.grade, batch?.category, "")).toLowerCase();
+    const matchesGroup = group === "all" || groupText.includes(group);
+    return matchesText && matchesGroup;
+  }), [batches, query, group]);
+
+  const batchId = activeBatch ? String(first(activeBatch.id, activeBatch.batch_id, activeBatch.course_id, activeBatch.batchId, "")) : "";
   const subjects = contentData?.batches?.[batchId]?.subjects || [];
   const currentFolder = folderStack.length ? folderStack[folderStack.length - 1] : activeChapter;
-  const resources = currentFolder ? [...(currentFolder.videos || []), ...(currentFolder.pdfs || [])] : [];
-  const filteredContent = resources.filter(item => filter === "all" || (filter === "pdf" ? isPdf(item) : isVideo(item)));
-  const closeTelegram = () => { setTelegramOpen(false); sessionStorage.setItem("himdisha-telegram-dismissed", "1"); };
-  const openBatch = batch => { setActiveBatch(batch); setActiveSubject(null); setActiveChapter(null); setFolderStack([]); setFilter("all"); };
-  const openSubject = subject => { setActiveSubject(subject); setActiveChapter(null); setFolderStack([]); setFilter("all"); };
-  const openChapter = chapter => { setActiveChapter(chapter); setFolderStack([chapter]); setFilter("all"); };
-  const openFolder = folder => setFolderStack(stack => [...stack, folder]);
-  const goBack = () => {
+  const videos = currentFolder?.videos || [];
+  const pdfs = currentFolder?.pdfs || [];
+  const items = tab === "pdfs" ? pdfs : videos;
+  const total = currentFolder ? countTree(currentFolder) : { videos: 0, pdfs: 0 };
+
+  const home = () => {
+    setView("home"); setActiveBatch(null); setActiveSubject(null); setActiveChapter(null);
+    setFolderStack([]); setPlayer(null); setQuery(""); setGroup("all");
+  };
+  const openBatch = batch => {
+    setActiveBatch(batch); setActiveSubject(null); setActiveChapter(null); setFolderStack([]);
+    setPlayer(null); setTab("videos"); setView("folders");
+  };
+  const back = () => {
     if (player) { setPlayer(null); return; }
     if (folderStack.length > 1) { setFolderStack(stack => stack.slice(0, -1)); return; }
     if (activeChapter) { setActiveChapter(null); setFolderStack([]); return; }
     if (activeSubject) { setActiveSubject(null); return; }
-    setActiveBatch(null);
+    setActiveBatch(null); setView("home");
   };
+  const openChapter = chapter => { setActiveChapter(chapter); setFolderStack([chapter]); setTab("videos"); };
+  const openFolder = folder => setFolderStack(stack => [...stack, folder]);
   const openItem = item => {
-    if (isPdf(item)) setPlayer({ item, kind: "pdf", url: cleanUrl(item.pdfUrl || item.pdf_url || item.url) });
-    else setPlayer({ item, kind: "video", stream: cleanUrl(item.streamUrl || item.stream_url), embed: cleanUrl(item.embedUrl || item.embed_url) });
+    if (isPdf(item)) {
+      const url = cleanUrl(item.pdfUrl || item.pdf_url || item.url);
+      setPlayer({ kind: "pdf", item, url });
+    } else {
+      setPlayer({ kind: "video", item, url: cleanUrl(item.embedUrl || item.embed_url || item.streamUrl || item.stream_url || (item.videoId ? "https://www.youtube.com/embed/" + item.videoId : "")) });
+    }
   };
-  const heading = activeChapter ? getTitle(currentFolder || activeChapter) : activeSubject ? getTitle(activeSubject) : activeBatch ? getTitle(activeBatch) : "Explore your batches";
+  const subjectsCount = subjects.length;
+  const headerTitle = activeChapter ? title(currentFolder) : activeSubject ? title(activeSubject) : activeBatch ? title(activeBatch) : view === "mine" ? "My Batches" : view === "developer" ? "Developer" : "All Batches";
+  const headerSub = activeChapter ? "अपना learning material चुनें।" : activeSubject ? "Subject का chapter चुनें।" : activeBatch ? "Subject और study material खोलें।" : "अपने पसंदीदा batch में पढ़ाई शुरू करें।";
 
-  return <div className="app-shell">
+  return <div>
     <header className="topbar">
-      <a className="brand" href="#" onClick={e => { e.preventDefault(); setActiveBatch(null); setActiveSubject(null); setActiveChapter(null); setFolderStack([]); }}>
-        <img src="/him-disha.svg" alt="HIM DISHA" /><span>HIM <b>DISHA</b><small>LEARN · GROW · ACHIEVE</small></span>
+      {(activeBatch || player) && <button className="back-btn" onClick={back} aria-label="Back"><Icon name="back" /></button>}
+      <a className="brand" href="#" onClick={event => { event.preventDefault(); home(); }}>
+        <img src={BASE + "images/him-apps-logo.png"} alt="HIM APPS logo" />
+        <span><b>HIM APPS</b><small>LEARN • GROW • SUCCEED</small></span>
       </a>
-      <nav className={mobileMenu ? "nav-links show" : "nav-links"}>
-        <button onClick={() => { setActiveBatch(null); setActiveSubject(null); setActiveChapter(null); setFolderStack([]); setMobileMenu(false); }}>Home</button>
-        <a href="#batches" onClick={() => setMobileMenu(false)}>Explore batches</a>
-        <a href={TELEGRAM_URL} target="_blank" rel="noreferrer">Telegram <Icon name="arrow" size={14}/></a>
-      </nav>
-      <button className="menu-btn" onClick={() => setMobileMenu(!mobileMenu)} aria-label="Toggle menu"><Icon name="menu"/></button>
-      <a className="top-cta" href={TELEGRAM_URL} target="_blank" rel="noreferrer">Join community <Icon name="arrow" size={16}/></a>
+      <button className="profile-btn" onClick={() => setView("developer")} aria-label="Profile">●</button>
     </header>
 
-    <main>
-      <section className="hero">
-        <div className="hero-copy">
-          <div className="eyebrow"><span className="pulse-dot"/> YOUR LEARNING COMPANION</div>
-          <h1>Find your direction.<br/><em>Own your future.</em></h1>
-          <p>One place for your batches, classes and study material. Learn at your pace, move forward with confidence.</p>
-          <div className="hero-actions"><a href="#batches" className="primary-btn">Explore batches <Icon name="arrow" size={17}/></a><span className="secure-note"><Icon name="shield" size={16}/> A smarter way to learn</span></div>
-        </div>
-        <div className="hero-art" aria-hidden="true">
-          <div className="orbit orbit-one"/><div className="orbit orbit-two"/>
-          <div className="hero-logo"><img src="/him-disha.svg" alt=""/></div>
-          <div className="float-card float-top"><span className="float-icon"><Icon name="book"/></span><span><b>Learn daily</b><small>Small steps, big goals</small></span></div>
-          <div className="float-card float-bottom"><span className="float-icon aqua"><Icon name="play"/></span><span><b>Learn anywhere</b><small>Video · PDF · Notes</small></span></div>
-          <div className="spark spark-a">✦</div><div className="spark spark-b">✧</div>
-        </div>
-      </section>
-
-      <section className="stats-strip">
-        <div><b>01</b><span>Choose your batch</span></div><i/><div><b>02</b><span>Open your lessons</span></div><i/><div><b>03</b><span>Keep progressing</span></div>
-      </section>
-
-      <section className="batch-section" id="batches">
-        <div className="section-heading"><div><div className="eyebrow dark-eyebrow">YOUR CLASSROOM</div><h2>{heading}</h2><p>{activeChapter ? "Open a lesson or folder." : activeSubject ? "Choose a chapter to continue." : activeBatch ? "Choose a subject to continue learning." : "Everything you need, organized in one place."}</p></div>
-          {activeBatch ? <button className="back-btn" onClick={goBack}>← Back</button> : <div className="search-box"><Icon name="search" size={18}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search batches..." aria-label="Search batches"/></div>}
+    <main className="app-shell">
+      {view === "developer" ? <section className="developer-panel">
+        <img src={BASE + "images/him-apps-logo.png"} alt="HIM APPS" />
+        <h2>HIM APPS</h2><p>Learning • Growth • Success</p>
+        <div className="dev-credit">POWERED BY <b>HIMANSHU JII</b></div>
+        <p className="dev-note">आपकी शिक्षा, आपकी सफलता — HIM APPS के साथ।</p>
+      </section> : <section className="library">
+        <div className="section-title">
+          <div><h2>{headerTitle}</h2><p>{headerSub}</p></div>
+          <span className="batch-count">{activeBatch ? (activeSubject ? (activeSubject.chapters || []).length + " CHAPTERS" : subjectsCount + " SUBJECTS") : view === "mine" ? "SAVED BATCHES" : batches.length + " BATCHES"}</span>
         </div>
 
-        {!activeBatch && <div className="batch-grid">
-          {loading && <div className="state-card"><div className="loader"/><b>Loading your classroom</b><span>Fetching the latest batches…</span></div>}
-          {!loading && error && <div className="state-card error-state"><b>Unable to load batches</b><span>{error}</span><button className="primary-btn small-btn" onClick={loadBatches}>Try again</button></div>}
-          {!loading && !error && visibleBatches.length === 0 && <div className="state-card"><b>{batches.length ? "No matching batches" : "Batches coming soon"}</b><span>{batches.length ? "Try another search term." : "New learning batches will appear here."}</span></div>}
-          {!loading && !error && visibleBatches.map((batch, index) => <button className="batch-card" key={text(first(batch.id, batch._id, batch.slug), index)} onClick={() => openBatch(batch)}>
-            <div className="batch-banner">{getImage(batch) ? <img src={getImage(batch)} alt={getTitle(batch)} loading="lazy" onError={e => { e.currentTarget.style.display = "none"; }}/> : <div className="banner-fallback"><img src="/him-disha.svg" alt=""/><span>HIM DISHA</span></div>}<span className="batch-number">BATCH {String(index + 1).padStart(2, "0")}</span></div>
-            <div className="batch-info"><div><h3>{getTitle(batch)}</h3><p>{text(first(batch.description, batch.subtitle, batch.category), "Study material and lessons")}</p></div><span className="card-arrow"><Icon name="arrow" size={18}/></span></div>
+        {!activeBatch && view !== "mine" && <label className="search"><Icon name="search" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search batches..." /></label>}
+        {!activeBatch && view !== "mine" && <div className="filters">
+          {["all","9th","10th","11th","12th","exam"].map(value => <button key={value} className={"filter " + (group === value ? "active" : "")} onClick={() => setGroup(value)}>{value === "all" ? "All Batches" : value === "exam" ? "Exams" : value + " Class"}</button>)}
+        </div>}
+
+        {activeBatch && <div className="breadcrumbs" onClick={back}>← {title(activeBatch)}{activeSubject ? " / " + title(activeSubject) : ""}{activeChapter ? " / " + title(currentFolder) : ""}</div>}
+
+        {!activeBatch && view !== "mine" && <div className="course-grid">
+          {loading && <div className="empty">Batches लोड हो रहे हैं…</div>}
+          {!loading && error && <div className="empty">{error} <button onClick={load}>Retry</button></div>}
+          {!loading && !error && visibleBatches.map((batch, index) => <article className="course-card" key={String(first(batch.id, batch._id, index))}>
+            {imageOf(batch) ? <img className="batch-image" src={imageOf(batch)} alt={title(batch)} loading="lazy" onError={event => { event.currentTarget.src = BASE + "images/him-apps-logo.png"; }} /> : <img className="batch-image" src={BASE + "images/him-apps-logo.png"} alt="HIM APPS" />}
+            <div className="card-info">
+              <div className="card-meta"><span>{txt(first(batch.group, batch.class, batch.grade, batch.category), "HIM APPS")}</span><span className="group-tag">AVAILABLE</span></div>
+              <h3>{title(batch)}</h3>
+              <div className="card-meta"><span>{txt(first(batch.validity, batch.duration, ""), "Study material")}</span><span>HIM APPS</span></div>
+              <div className="card-actions"><button className="enroll-btn" onClick={() => openBatch(batch)}>Open batch</button><button className="study-btn" onClick={() => openBatch(batch)}>Let's Study →</button></div>
+            </div>
+          </article>)}
+          {!loading && !error && !visibleBatches.length && <div className="empty">कोई batch नहीं मिला।</div>}
+        </div>}
+
+        {view === "mine" && !activeBatch && <div className="empty">My Batches देखने के लिए किसी batch को खोलें।</div>}
+
+        {activeBatch && !activeSubject && <div className="folder-list">
+          {!contentReady && <div className="empty">Resources लोड हो रहे हैं…</div>}
+          {contentReady && subjects.map(subject => <button className="folder" key={subject.id} onClick={() => setActiveSubject(subject)}>
+            <span className="folder-icon"><Icon name="folder" /></span>
+            <span><b>{title(subject)}</b><small>{(subject.chapters || []).length} chapters</small></span><span className="go">›</span>
           </button>)}
+          {contentReady && !subjects.length && <div className="empty">{contentData?.errors?.[batchId] || "इस batch के subjects API से नहीं मिले। Refresh कुछ देर बाद करें।"}</div>}
         </div>}
 
-        {activeBatch && !activeSubject && <div className="lesson-area">
-          <div className="lesson-toolbar"><div className="lesson-count"><Icon name="layers" size={17}/>{subjects.length} subjects</div></div>
-          <div className="content-grid">{subjects.map((subject, i) => <button className="content-tile" key={subject.id || i} onClick={() => openSubject(subject)}><span className="content-tile-icon"><Icon name="book" size={22}/></span><span><b>{getTitle(subject)}</b><small>{(subject.chapters || []).length} chapters</small></span><Icon name="arrow" size={17}/></button>)}</div>
-          {!subjects.length && <div className="state-card"><b>Subjects not available</b><span>{contentData?.errors?.[batchId] || "This batch has no public subject data in the latest content snapshot."}</span></div>}
+        {activeBatch && activeSubject && !activeChapter && <div className="folder-list">
+          {(activeSubject.chapters || []).map(chapter => {
+            const counts = countTree(chapter);
+            return <button className="folder" key={chapter.id} onClick={() => openChapter(chapter)}>
+              <span className="folder-icon"><Icon name="folder" /></span>
+              <span><b>{title(chapter)}</b><small>{counts.videos} videos · {counts.pdfs} PDFs · {(chapter.folders || []).length} folders</small></span><span className="go">›</span>
+            </button>;
+          })}
+          {!(activeSubject.chapters || []).length && <div className="empty">इस subject में chapters नहीं मिले।</div>}
         </div>}
-        {activeBatch && activeSubject && !activeChapter && <div className="lesson-area">
-          <div className="lesson-toolbar"><div className="lesson-count"><Icon name="layers" size={17}/>{(activeSubject.chapters || []).length} chapters</div></div>
-          <div className="content-grid">{(activeSubject.chapters || []).map((chapter, i) => <button className="content-tile" key={chapter.id || i} onClick={() => openChapter(chapter)}><span className="content-tile-icon folder-tile"><Icon name="folder" size={22}/></span><span><b>{getTitle(chapter)}</b><small>{(chapter.videos || []).length} videos · {(chapter.pdfs || []).length} PDFs · {(chapter.folders || []).length} folders</small></span><Icon name="arrow" size={17}/></button>)}</div>
-          {!activeSubject.chapters?.length && <div className="state-card"><b>No chapters found</b><span>This subject has no public chapter folders.</span></div>}
+
+        {activeBatch && activeChapter && <div className="material-panel">
+          {(currentFolder?.folders || []).length > 0 && <div className="folder-list">
+            {currentFolder.folders.map(folder => <button className="folder" key={folder.id} onClick={() => openFolder(folder)}>
+              <span className="folder-icon"><Icon name="folder" /></span><span><b>{title(folder)}</b><small>{countTree(folder).videos} videos · {countTree(folder).pdfs} PDFs</small></span><span className="go">›</span>
+            </button>)}
+          </div>}
+          <div className="tabs">
+            <button className={"tab " + (tab === "videos" ? "active" : "")} onClick={() => setTab("videos")}>▶ Videos ({videos.length})</button>
+            <button className={"tab " + (tab === "pdfs" ? "active" : "")} onClick={() => setTab("pdfs")}>▤ PDFs ({pdfs.length})</button>
+          </div>
+          <div>
+            {items.map((item, index) => <button className="material-item" key={item.id || index} onClick={() => openItem(item)}>
+              <span className="course-icon">{tab === "videos" ? <Icon name="video" /> : <Icon name="file" />}</span>
+              <span><b>{title(item)}</b><small>{tab === "videos" ? (item.duration || "Video lecture") : "PDF study material"}</small></span>
+              <span className="go">↗</span>
+            </button>)}
+            {!items.length && <div className="empty">{tab === "videos" ? "इस folder में video उपलब्ध नहीं है।" : "इस folder में PDF उपलब्ध नहीं है।"}</div>}
+          </div>
         </div>}
-        {activeBatch && activeChapter && currentFolder && <div className="lesson-area">
-          <div className="lesson-toolbar"><div className="lesson-count"><Icon name="layers" size={17}/>{resources.length} resources · {(currentFolder.folders || []).length} folders</div><div className="filter-tabs">{[["all","All"],["video","Videos"],["pdf","PDFs"]].map(([key,label]) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{label}</button>)}</div></div>
-          <div className="content-grid">{(currentFolder.folders || []).map((folder, i) => <button className="content-tile" key={folder.id || i} onClick={() => openFolder(folder)}><span className="content-tile-icon folder-tile"><Icon name="folder" size={22}/></span><span><b>{getTitle(folder)}</b><small>Open folder</small></span><Icon name="arrow" size={17}/></button>)}</div>
-          {filteredContent.length === 0 ? <div className="state-card"><b>No lessons found</b><span>This folder has no matching video or PDF resources.</span></div> : <div className="lesson-grid">{filteredContent.map((item, i) => <article className="lesson-card" key={text(first(item.id, item.pdfUrl, item.streamUrl), i)}><div className={isPdf(item) ? "lesson-icon pdf-icon" : "lesson-icon video-icon"}><Icon name={isPdf(item) ? "file" : "play"} size={22}/></div><div className="lesson-copy"><b>{getTitle(item)}</b><span>{isPdf(item) ? "PDF DOCUMENT" : "VIDEO LESSON"}{item.duration ? " · " + item.duration : ""}</span></div><button className="open-lesson" onClick={() => openItem(item)}>{isPdf(item) ? "Open PDF" : "Play"} <Icon name="arrow" size={15}/></button></article>)}</div>}
-        </div>}
-      </section>
+      </section>}
     </main>
 
-    <footer><a className="brand footer-brand" href="#"><img src="/him-disha.svg" alt=""/><span>HIM <b>DISHA</b><small>LEARN · GROW · ACHIEVE</small></span></a><span>Made for learners, built for possibilities.</span><a href={TELEGRAM_URL} target="_blank" rel="noreferrer">Join Telegram ↗</a></footer>
+    <nav className="bottom-nav" aria-label="Main navigation">
+      <button className={"nav-item " + (view === "home" ? "active" : "")} onClick={home}><Icon name="home" /><small>Home</small></button>
+      <button className={"nav-item " + (view === "mine" ? "active" : "")} onClick={() => { setView("mine"); setActiveBatch(null); setActiveSubject(null); setActiveChapter(null); setFolderStack([]); }}><Icon name="mine" /><small>My Batches</small></button>
+      <button className={"nav-item " + (view === "developer" ? "active" : "")} onClick={() => { setView("developer"); setActiveBatch(null); setActiveSubject(null); setActiveChapter(null); }}><Icon name="dev" /><small>Developer</small></button>
+    </nav>
 
-    {player && <div className="modal-backdrop" role="presentation" onClick={() => setPlayer(null)}><section className="viewer-modal" role="dialog" aria-modal="true" aria-label="Learning material" onClick={e => e.stopPropagation()}><div className="viewer-head"><div><span className="eyebrow dark-eyebrow">HIM DISHA CLASSROOM</span><h3>{getTitle(player.item)}</h3></div><button className="icon-btn" onClick={() => setPlayer(null)} aria-label="Close"><Icon name="close"/></button></div>
-      {player.kind === "video" ? player.embed ? <iframe className="video-frame" title={getTitle(player.item)} src={player.embed} allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen/> : player.stream ? <video className="video-player" src={player.stream} controls playsInline autoPlay preload="metadata"/> : <div className="external-resource">Video stream is not available.</div> : <iframe className="pdf-viewer" title="PDF viewer" src={player.url}/>}
-      <div className="viewer-foot">{player.kind === "pdf" && <a className="download-btn" href={player.url} target="_blank" rel="noreferrer" download><Icon name="download" size={17}/> Download PDF</a>}{player.kind === "video" && player.stream && <a className="download-btn" href={player.stream} target="_blank" rel="noreferrer" download><Icon name="download" size={17}/> Download video</a>}<a className="open-new" href={player.kind === "pdf" ? player.url : (player.embed || player.stream || "#")} target="_blank" rel="noreferrer">Open in new tab ↗</a></div>
-    </section></div>}
-
-    {telegramOpen && <div className="telegram-overlay"><div className="telegram-card"><button className="telegram-close" onClick={closeTelegram} aria-label="Close"><Icon name="close" size={18}/></button><div className="telegram-mark">➤</div><div className="eyebrow dark-eyebrow">STAY IN THE LOOP</div><h3>Join the HIM DISHA community</h3><p>Get learning updates, announcements and new batch information.</p><a className="primary-btn telegram-join" href={TELEGRAM_URL} target="_blank" rel="noreferrer" onClick={closeTelegram}>Join on Telegram <Icon name="arrow" size={17}/></a><button className="later-btn" onClick={closeTelegram}>Maybe later</button></div></div>}
+    {player && <div className="viewer-overlay open" onClick={event => { if (event.target === event.currentTarget) setPlayer(null); }}>
+      <section className="viewer-dialog" role="dialog" aria-modal="true">
+        <header className="viewer-header"><b className="viewer-title">{title(player.item)}</b><button className="viewer-close" onClick={() => setPlayer(null)} aria-label="Close">✕</button></header>
+        {player.kind === "pdf" ? (player.url ? <iframe className="viewer-frame" title="PDF viewer" src={player.url} /> : <div className="empty">इस PDF का valid URL API ने नहीं दिया।</div>) : player.url ? (/\.m3u8|\.mp4|\.webm/i.test(player.url) ? <video className="viewer-frame" controls playsInline src={player.url} /> : <iframe className="viewer-frame" title="Video player" src={player.url} allow="autoplay; fullscreen; picture-in-picture" allowFullScreen />) : <div className="empty">इस video का playback URL उपलब्ध नहीं है।</div>}
+        {player.kind === "pdf" && player.url && <div className="viewer-header"><a href={player.url} target="_blank" rel="noreferrer">Open / Download PDF ↗</a></div>}
+      </section>
+    </div>}
   </div>;
 }
-
-export default App;
