@@ -23,23 +23,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Refresh batch API snapshot
-        continue-on-error: true
         run: |
           mkdir -p public
           node --input-type=module <<'NODE'
-          const url = "https://hrrydoc.vercel.app/api/disha/batches";
-          try {
-            const response = await fetch(url, { headers: { accept: "application/json" } });
-            if (!response.ok) throw new Error("HTTP " + response.status);
-            const json = await response.json();
-            const rows = Array.isArray(json) ? json : json?.data;
-            if (!Array.isArray(rows) || !rows.length) throw new Error("No batch records in API response");
-            await (await import("node:fs/promises")).writeFile("public/disha-batches.json", JSON.stringify({ success: true, data: rows }));
-            console.log("Saved " + rows.length + " batches for same-origin loading.");
-          } catch (error) {
-            console.error("Batch snapshot refresh failed:", error.message);
-            process.exitCode = 1;
+          const fs = await import("node:fs/promises");
+          const urls = [
+            "https://hrrydoc.vercel.app/api/disha/batches",
+            "https://skeducation.github.io/HIM-DISHA-/disha-batches.json"
+          ];
+          let saved = false;
+          let errors = [];
+          for (const url of urls) {
+            try {
+              const response = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(20000), cache: "no-store" });
+              if (!response.ok) throw new Error("HTTP " + response.status);
+              const json = await response.json();
+              const rows = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : Array.isArray(json?.batches) ? json.batches : [];
+              if (!rows.length) throw new Error("No batch records in response");
+              await fs.writeFile("public/disha-batches.json", JSON.stringify({ success: true, data: rows }));
+              console.log("Saved " + rows.length + " batches from " + url);
+              saved = true;
+              break;
+            } catch (error) {
+              errors.push(url + ": " + error.message);
+              console.warn("Batch source unavailable:", url, error.message);
+            }
           }
+          if (!saved) {
+            try {
+              await fs.access("public/disha-batches.json");
+              console.warn("Keeping checked-out batch snapshot as fallback.");
+              saved = true;
+            } catch {}
+          }
+          if (!saved) throw new Error("No batch snapshot available. " + errors.join(" | "));
           NODE
       - name: Setup Node
         uses: actions/setup-node@v4
