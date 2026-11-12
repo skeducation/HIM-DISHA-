@@ -118,8 +118,9 @@ const Icon = ({ name }) => {
 
 export default function App() {
   const [batches, setBatches] = useState([]);
-  const [contentData, setContentData] = useState(null);
-  const [contentReady, setContentReady] = useState(false);
+  const [subjects, setSubjects] = useState([]);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [favourites, setFavourites] = useState(() => { try { return JSON.parse(localStorage.getItem('him-disha-favourites') || '[]'); } catch { return []; } });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -157,11 +158,6 @@ export default function App() {
 
   useEffect(() => {
     load();
-    fetch(BASE + "disha-content.json", { cache: "no-store" })
-      .then(response => { if (!response.ok) throw new Error("Content snapshot HTTP " + response.status); return response.json(); })
-      .then(setContentData)
-      .catch(error => console.warn("Resources snapshot:", error.message))
-      .finally(() => setContentReady(true));
   }, []);
 
   const visibleBatches = useMemo(() => batches.filter(batch => {
@@ -172,7 +168,8 @@ export default function App() {
   }), [batches, query, group]);
 
   const batchId = activeBatch ? String(first(activeBatch.id, activeBatch.batch_id, activeBatch.course_id, activeBatch.batchId, "")) : "";
-  const subjects = contentData?.batches?.[batchId]?.subjects || [];
+  const savedBatches = useMemo(() => batches.filter(batch => favourites.includes(String(first(batch.id, batch.batch_id, batch.course_id, batch.batchId, "")))), [batches, favourites]);
+  const toggleFavourite = batch => { const id = String(first(batch.id, batch.batch_id, batch.course_id, batch.batchId, "")); if (!id) return; setFavourites(current => { const next = current.includes(id) ? current.filter(value => value !== id) : [...current, id]; try { localStorage.setItem("him-disha-favourites", JSON.stringify(next)); } catch {} return next; }); };
   const currentFolder = folderStack.length ? folderStack[folderStack.length - 1] : activeChapter;
   const videos = currentFolder?.videos || [];
   const pdfs = currentFolder?.pdfs || [];
@@ -183,16 +180,25 @@ export default function App() {
     setView("home"); setActiveBatch(null); setActiveSubject(null); setActiveChapter(null);
     setFolderStack([]); setPlayer(null); setQuery(""); setGroup("all");
   };
-  const openBatch = batch => {
-    setActiveBatch(batch); setActiveSubject(null); setActiveChapter(null); setFolderStack([]);
-    setPlayer(null); setTab("videos"); setView("folders");
+  const openBatch = async batch => {
+    setActiveBatch(batch); setActiveSubject(null); setActiveChapter(null); setSubjects([]); setFolderStack([]);
+    setPlayer(null); setTab("videos"); setView("folders"); setError(""); setResourcesLoading(true);
+    try {
+      const id = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
+      if (!id) throw new Error("Batch ID API में नहीं मिला");
+      const response = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }));
+      const rows = apiRows(response?.data ?? response).map(x => ({ ...x, id: apiId(x), title: apiTitle(x) })).filter(x => x.id);
+      setSubjects(rows);
+      if (!rows.length) setError("इस Batch के लिए Original API ने कोई Subject नहीं लौटाया।");
+    } catch (e) { setError("Subjects load नहीं हुए: " + e.message); }
+    finally { setResourcesLoading(false); }
   };
   const back = () => {
     if (player) { setPlayer(null); return; }
     if (folderStack.length > 1) { setFolderStack(stack => stack.slice(0, -1)); return; }
     if (activeChapter) { setActiveChapter(null); setFolderStack([]); return; }
     if (activeSubject) { setActiveSubject(null); return; }
-    setActiveBatch(null); setView("home");
+    setActiveBatch(null); setSubjects([]); setView("home");
   };
   const openSubject = async subject => {
     setActiveSubject({ ...subject, chapters: [] }); setActiveChapter(null); setFolderStack([]); setResourcesLoading(true);
@@ -271,21 +277,30 @@ export default function App() {
               <div className="card-meta"><span>{txt(first(batch.group, batch.class, batch.grade, batch.category), "HIM APPS")}</span><span className="group-tag">AVAILABLE</span></div>
               <h3>{title(batch)}</h3>
               <div className="card-meta"><span>{txt(first(batch.validity, batch.duration, ""), "Study material")}</span><span>HIM APPS</span></div>
+              <div className="card-actions"><button className={"favourite-btn " + (favourites.includes(String(first(batch.id, batch.batch_id, batch.course_id, batch.batchId, ""))) ? "saved" : "")} onClick={() => toggleFavourite(batch)}>{favourites.includes(String(first(batch.id, batch.batch_id, batch.course_id, batch.batchId, ""))) ? "★ Saved" : "☆ Favourite"}</button></div>
               <div className="card-actions"><button className="enroll-btn" onClick={() => openBatch(batch)}>Open batch</button><button className="study-btn" onClick={() => openBatch(batch)}>Let's Study →</button></div>
             </div>
           </article>)}
           {!loading && !error && !visibleBatches.length && <div className="empty">कोई batch नहीं मिला।</div>}
         </div>}
 
-        {view === "mine" && !activeBatch && <div className="empty">My Batches देखने के लिए किसी batch को खोलें।</div>}
+        {view === "mine" && !activeBatch && <div className="course-grid">
+          {savedBatches.map((batch, index) => <article className="course-card" key={String(first(batch.id, batch.batch_id, batch.course_id, index))}>
+            {imageOf(batch) ? <img className="batch-image" src={imageOf(batch)} alt={title(batch)} loading="lazy" /> : <img className="batch-image" src={BASE + "images/him-apps-logo.png"} alt="HIM APPS" />}
+            <div className="card-info"><div className="card-meta"><span>FAVOURITE</span><button className="favourite-btn saved" onClick={() => toggleFavourite(batch)}>★ Saved</button></div>
+              <h3>{title(batch)}</h3><div className="card-actions"><button className="enroll-btn" onClick={() => openBatch(batch)}>Open batch</button><button className="study-btn" onClick={() => openBatch(batch)}>Let's Study →</button></div>
+            </div>
+          </article>)}
+          {!savedBatches.length && <div className="empty">अभी कोई Favourite Batch नहीं है। All Batches में ☆ Favourite दबाकर यहाँ सेव करें।</div>}
+        </div>}
 
         {activeBatch && !activeSubject && <div className="folder-list">
-          {!contentReady && <div className="empty">Resources लोड हो रहे हैं…</div>}
-          {contentReady && subjects.map(subject => <button className="folder" key={subject.id} onClick={() => openSubject(subject)}>
+          {resourcesLoading && <div className="empty">Original API से Subjects लोड हो रहे हैं…</div>}
+          {!resourcesLoading && subjects.map(subject => <button className="folder" key={subject.id} onClick={() => openSubject(subject)}>
             <span className="folder-icon"><Icon name="folder" /></span>
             <span><b>{title(subject)}</b><small>{(subject.chapters || []).length} chapters</small></span><span className="go">›</span>
           </button>)}
-          {!resourcesLoading && !subjects.length && <div className="empty">{error || "इस batch के subjects API से नहीं मिले। Refresh करके दोबारा कोशिश करें।"}</div>}
+          {!resourcesLoading && !subjects.length && <div className="empty">{error || "इस batch के subjects API से नहीं मिले।"} <button onClick={() => openBatch(activeBatch)}>Retry</button></div>}
         </div>}
 
         {activeBatch && activeSubject && !activeChapter && <div className="folder-list">
