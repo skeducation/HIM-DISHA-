@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const BASE = import.meta.env.BASE_URL;
 const API_URL = "https://hrrydoc.vercel.app/api/disha/batches";
@@ -132,6 +132,24 @@ export default function App() {
   const [folderStack, setFolderStack] = useState([]);
   const [tab, setTab] = useState("videos");
   const [player, setPlayer] = useState(null);
+  const [contentData, setContentData] = useState(null);
+  const contentPromiseRef = useRef(null);
+
+  const ensureContent = async () => {
+    if (contentData) return contentData;
+    if (!contentPromiseRef.current) {
+      contentPromiseRef.current = fetch(BASE + "disha-content.json", { cache: "force-cache" })
+        .then(async response => {
+          if (!response.ok) throw new Error("Study content snapshot HTTP " + response.status);
+          const json = await response.json();
+          if (!json?.batches || typeof json.batches !== "object") throw new Error("Study content snapshot format invalid");
+          setContentData(json);
+          return json;
+        })
+        .catch(error => { contentPromiseRef.current = null; throw error; });
+    }
+    return contentPromiseRef.current;
+  };
 
   const load = async () => {
     setLoading(true); setError("");
@@ -158,6 +176,7 @@ export default function App() {
 
   useEffect(() => {
     load();
+    ensureContent().catch(() => {});
   }, []);
 
   const visibleBatches = useMemo(() => batches.filter(batch => {
@@ -185,12 +204,12 @@ export default function App() {
     setPlayer(null); setTab("videos"); setView("folders"); setError(""); setResourcesLoading(true);
     try {
       const id = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
-      if (!id) throw new Error("Batch ID API में नहीं मिला");
-      const response = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }));
-      const rows = apiRows(response?.data ?? response).map(x => ({ ...x, id: apiId(x), title: apiTitle(x) })).filter(x => x.id);
+      if (!id) throw new Error("Batch ID उपलब्ध नहीं है");
+      const content = await ensureContent();
+      const rows = content.batches?.[id]?.subjects || [];
       setSubjects(rows);
-      if (!rows.length) setError("इस Batch के लिए Original API ने कोई Subject नहीं लौटाया।");
-    } catch (e) { setError("Subjects load नहीं हुए: " + e.message); }
+      if (!rows.length) setError(content.errors?.[id] || "इस Batch का Original Study Content snapshot में उपलब्ध नहीं है।");
+    } catch (e) { setError("Study material load नहीं हुआ: " + e.message); }
     finally { setResourcesLoading(false); }
   };
   const back = () => {
@@ -200,31 +219,12 @@ export default function App() {
     if (activeSubject) { setActiveSubject(null); return; }
     setActiveBatch(null); setSubjects([]); setView("home");
   };
-  const openSubject = async subject => {
-    setActiveSubject({ ...subject, chapters: [] }); setActiveChapter(null); setFolderStack([]); setResourcesLoading(true);
-    try {
-      const batch = String(first(activeBatch?.id, activeBatch?.batch_id, activeBatch?.course_id, activeBatch?.batchId, ""));
-      const q = new URLSearchParams({ batchId: batch, subjectId: apiId(subject) });
-      const response = await apiGet("/api/disha/chapters?" + q);
-      const chapters = apiRows(response?.data ?? response).filter(x => apiId(x)).map(x => ({ ...x, id: apiId(x), title: apiTitle(x), folders: [], videos: [], pdfs: [] }));
-      setActiveSubject({ ...subject, chapters });
-    } catch (e) { setError("Chapters load नहीं हुए: " + e.message); }
-    finally { setResourcesLoading(false); }
+  const openSubject = subject => {
+    setActiveSubject(subject); setActiveChapter(null); setFolderStack([]); setError("");
+    setTab("videos");
   };
-  const openChapter = async chapter => {
-    setActiveChapter({ ...chapter, folders: [], videos: [], pdfs: [] }); setFolderStack([]); setTab("videos"); setResourcesLoading(true);
-    try {
-      const batch = String(first(activeBatch?.id, activeBatch?.batch_id, activeBatch?.course_id, activeBatch?.batchId, ""));
-      const subject = String(first(activeSubject?.id, activeSubject?.subject_id, ""));
-      const q = new URLSearchParams({ batchId: batch, subjectId: subject });
-      const response = await apiGet("/api/disha/chapters?" + q);
-      const chapterRows = apiRows(response?.data ?? response);
-      const actual = chapterRows.find(x => apiId(x) === apiId(chapter)) || chapter;
-      const tree = await loadFolderTree(batch, subject, apiId(chapter));
-      const full = { ...actual, ...tree, id: apiId(chapter), title: apiTitle(chapter) };
-      setActiveChapter(full); setFolderStack([full]);
-    } catch (e) { setActiveChapter({ ...chapter, folders: [], videos: [], pdfs: [], loadError: e.message }); setFolderStack([]); }
-    finally { setResourcesLoading(false); }
+  const openChapter = chapter => {
+    setActiveChapter(chapter); setFolderStack([chapter]); setTab("videos"); setError("");
   };
   const openFolder = folder => setFolderStack(stack => [...stack, folder]);
   const openItem = item => {
