@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { createDecipheriv } from "node:crypto";
 
 const API = "https://hrrydoc.vercel.app";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -59,6 +60,53 @@ async function get(path) {
   throw lastError || new Error("API request failed");
 }
 
+function decodeAppx(value) {
+  if (!value || typeof value !== "string" || !value.includes(":") || value.startsWith("http")) return String(value || "").trim();
+  try {
+    const [cipher, iv] = value.split(":");
+    const decipher = createDecipheriv("aes-128-cbc", Buffer.from("638udh3829162018"), Buffer.from(iv, "base64"));
+    return Buffer.concat([decipher.update(Buffer.from(cipher, "base64")), decipher.final()]).toString("utf8").trim();
+  } catch { return ""; }
+}
+function youtubeId(value) {
+  const text = String(value || "").trim();
+  if (/^[A-Za-z0-9_-]{11}$/.test(text)) return text;
+  return text.match(/(?:v=|youtu\.be\/|embed\/|live\/|shorts\/)([A-Za-z0-9_-]{11})/)?.[1] || "";
+}
+function videoInfo(item) {
+  const qualities = [];
+  let streamUrl = "", videoId = "";
+  for (const link of (Array.isArray(item?.encrypted_links) ? item.encrypted_links : [])) {
+    const url = decodeAppx(link.path) || decodeAppx(link.backup_url);
+    if (url && /^https?:\/\//i.test(url) && !/\/hls-drm-/i.test(url)) {
+      qualities.push({ quality: String(link.quality || "Auto"), url });
+      streamUrl ||= url;
+    }
+  }
+  for (const key of ["download_link","download_link2","download_url_higher_version","download_url_lower_version","recording_hls","file_link"]) {
+    const url = decodeAppx(item?.[key]);
+    if (!url) continue;
+    const id = youtubeId(url);
+    if (id) videoId ||= id;
+    else if (/^https?:\/\//i.test(url) && !/\/hls-drm-/i.test(url)) {
+      streamUrl ||= url;
+      if (!qualities.some(q => q.url === url)) qualities.push({ quality: key === "file_link" ? "Default" : "Direct", url });
+    }
+  }
+  videoId ||= youtubeId(decodeAppx(item?.video_id));
+  if (!videoId) videoId = youtubeId(streamUrl);
+  const embedUrl = videoId ? "https://www.youtube.com/embed/" + videoId + "?playsinline=1&rel=0" : "";
+  const token = String(item?.video_player_token || "").trim();
+  let playerUrl = "";
+  if (token && token !== "1234") {
+    const raw = String(item?.video_player_url || "");
+    playerUrl = /token=$/.test(raw) && raw.includes("combined-img-player")
+      ? raw + encodeURIComponent(token)
+      : "https://appx-play.classx.co.in/combined-img-player?isMobile=true&token=" + encodeURIComponent(token);
+  }
+  return { streamUrl, embedUrl: embedUrl || playerUrl, videoId, qualities };
+}
+
 function normalizeResource(item, kind) {
   const video = kind === "video";
   return {
@@ -67,30 +115,14 @@ function normalizeResource(item, kind) {
     duration: String(item?.duration ?? ""),
     thumbnail: String(first(item?.thumbnail, item?.image, item?.image_url, "")),
     kind,
-    streamUrl: String(first(item?.streamUrl, item?.stream_url, item?.url, "")),
-    embedUrl: String(first(item?.embedUrl, item?.embed_url, item?.playerUrl, item?.player_url, "")),
-    videoId: String(first(item?.videoId, item?.video_id, "")),
-    qualities: Array.isArray(item?.qualities) ? item.qualities : [],
+    streamUrl: String(first(item?.streamUrl, item?.stream_url, item?.url, derived.streamUrl, "")),
+    embedUrl: String(first(item?.embedUrl, item?.embed_url, item?.playerUrl, item?.player_url, derived.embedUrl, "")),
+    videoId: String(first(item?.videoId, item?.video_id, derived.videoId, "")),
+    qualities: Array.isArray(item?.qualities) ? item.qualities : (derived.qualities || []),
     pdfUrl: String(first(item?.pdfUrl, item?.pdf_url, item?.pdf_link, item?.file_link, item?.download_link, "")),
     pdfKey: String(first(item?.pdfKey, item?.pdf_key, item?.pdf_encryption_key, item?.file_key, "")),
     raw: item
   };
-}
-
-async function enrichVideo(batchId, subjectId, chapterId, item) {
-  const out = normalizeResource(item, "video");
-  if (out.streamUrl || out.embedUrl || out.videoId) return out;
-  const lectureId = out.id;
-  if (!lectureId) return out;
-  try {
-    const query = new URLSearchParams({ batchId, subjectId, chapterId, lectureId });
-    const detail = await get("/api/disha/video?" + query);
-    const data = detail?.data || detail?.video || detail;
-    return { ...out, ...normalizeResource({ ...item, ...data }, "video"), raw: { ...item, ...data } };
-  } catch (error) {
-    console.warn("Video detail unavailable", batchId, lectureId, error.message);
-    return out;
-  }
 }
 
 async function walkFolder(batchId, subjectId, chapterId, seen, depth = 0) {
@@ -119,7 +151,7 @@ async function walkFolder(batchId, subjectId, chapterId, seen, depth = 0) {
   }
   const videos = [];
   for (const item of videosRaw) {
-    const enriched = await enrichVideo(batchId, subjectId, chapterId, item);
+    const enriched = normalizeResource(item, "video");
     if (enriched.id) videos.push(enriched);
   }
   const pdfs = pdfsRaw.map(item => normalizeResource(item, "pdf")).filter(item => item.id || item.pdfUrl || item.pdfKey);
