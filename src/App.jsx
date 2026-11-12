@@ -6,7 +6,13 @@ const TELEGRAM_URL = "https://t.me/HIMAPPS";
 const first = (...values) => values.find(v => v !== undefined && v !== null && v !== "");
 const text = (v, fallback = "") => typeof v === "string" || typeof v === "number" ? String(v) : fallback;
 const getTitle = x => text(first(x?.title, x?.name, x?.batchName, x?.batch_name, x?.label), "Untitled");
-const getImage = x => first(x?.banner, x?.bannerUrl, x?.banner_url, x?.image, x?.imageUrl, x?.image_url, x?.thumbnail, x?.thumbnailUrl, x?.cover);
+const cleanUrl = value => {
+  if (typeof value !== "string") return "";
+  const s = value.trim();
+  const md = s.match(/^\[(.*?)\]\((https?:\/\/[^)]+)\)$/);
+  return (md ? md[2] : s).replace(/&amp;/g, "&");
+};
+const getImage = x => cleanUrl(first(x?.banner, x?.bannerUrl, x?.banner_url, x?.image, x?.imageUrl, x?.image_url, x?.thumbnail, x?.thumbnailUrl, x?.cover));
 const getUrl = x => first(x?.url, x?.link, x?.fileUrl, x?.file_url, x?.pdfUrl, x?.pdf_url, x?.videoUrl, x?.video_url, x?.src, x?.downloadUrl);
 const isPdf = x => /pdf/i.test([x?.type, x?.kind, x?.mimeType, x?.mime_type, x?.format, getUrl(x)].filter(Boolean).join(" "));
 const isVideo = x => /video|mp4|m3u8|webm/i.test([x?.type, x?.kind, x?.mimeType, x?.mime_type, x?.format, getUrl(x)].filter(Boolean).join(" "));
@@ -73,13 +79,16 @@ function App() {
     setLoading(true); setError("");
     try {
       const response = await fetch(API_URL, { method: "GET", headers: { Accept: "application/json" }, cache: "no-store" });
-      if (!response.ok) throw new Error("Server returned " + response.status);
-      const json = await response.json();
-      const rows = listFrom(json);
-      if (!rows.length && json && (json.success === false || json.error)) throw new Error(text(json.message || json.error, "API request failed"));
+      if (!response.ok) throw new Error("API HTTP " + response.status);
+      const raw = await response.text();
+      let json;
+      try { json = JSON.parse(raw); } catch { throw new Error("API response valid JSON nahi hai"); }
+      if (json?.success === false) throw new Error(text(json.message || json.error, "API request failed"));
+      const rows = listFrom(json?.data ?? json);
+      if (!rows.length) throw new Error("API ke data array mein koi batch nahi mila");
       setBatches(rows);
     } catch (e) {
-      setError("Batches abhi load nahi ho paaye. Internet check karke dobara try karein.");
+      setError("API se batches load nahi hue. " + (e?.message || "Network/CORS error") + ". Retry karke dekhein.");
     } finally { setLoading(false); }
   };
 
