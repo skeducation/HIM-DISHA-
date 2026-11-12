@@ -119,9 +119,9 @@ export default function App() {
   const openItem = item => {
     if (isPdf(item)) {
       const url = cleanUrl(item.pdfUrl || item.pdf_url || item.url);
-      setPlayer({ kind: "pdf", item, url });
+      setPlayer({ kind: "pdf", item, url, downloadUrl: cleanUrl(item.downloadUrl || item.download_url || url) });
     } else {
-      setPlayer({ kind: "video", item, url: cleanUrl(item.embedUrl || item.embed_url || item.streamUrl || item.stream_url || (item.videoId ? "https://www.youtube.com/embed/" + item.videoId : "")) });
+      setPlayer({ kind: "video", item, url: cleanUrl(item.embedUrl || item.embed_url || item.streamUrl || item.stream_url || (item.videoId ? "https://www.youtube.com/embed/" + item.videoId : "")), downloadUrl: cleanUrl(item.downloadUrl || item.download_url || "") });
     }
   };
   const subjectsCount = subjects.length;
@@ -226,7 +226,8 @@ export default function App() {
       <section className="viewer-dialog" role="dialog" aria-modal="true">
         <header className="viewer-header"><b className="viewer-title">{title(player.item)}</b><button className="viewer-close" onClick={() => setPlayer(null)} aria-label="Close">✕</button></header>
         {player.kind === "pdf" ? (player.url ? <iframe className="viewer-frame" title="PDF viewer" src={player.url} /> : <div className="empty">इस PDF का valid URL API ने नहीं दिया।</div>) : player.url ? (/\.m3u8|\.mp4|\.webm/i.test(player.url) ? <video className="viewer-frame" controls playsInline src={player.url} /> : <iframe className="viewer-frame" title="Video player" src={player.url} allow="autoplay; fullscreen; picture-in-picture" allowFullScreen />) : <div className="empty">इस video का playback URL उपलब्ध नहीं है।</div>}
-        {player.kind === "pdf" && player.url && <div className="viewer-header"><a href={player.url} target="_blank" rel="noreferrer">Open / Download PDF ↗</a></div>}
+        {player.kind === "pdf" && player.url && <div className="viewer-header"><a href={player.url} target="_blank" rel="noreferrer">Open PDF ↗</a><a href={player.downloadUrl || player.url} target="_blank" rel="noreferrer" download>Download PDF ↓</a></div>}
+        {player.kind === "video" && player.downloadUrl && <div className="viewer-header"><a href={player.downloadUrl} target="_blank" rel="noreferrer" download>Download original video ↓</a></div>}
       </section>
     </div>}
   </div>;
