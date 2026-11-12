@@ -26,7 +26,7 @@ const first = (...values) => values.find(v => v !== undefined && v !== null && v
 async function get(path) {
   let lastError;
   for (let attempt = 1; attempt <= 7; attempt++) {
-    const gap = 1100 - (Date.now() - lastRequestAt);
+    const gap = 350 - (Date.now() - lastRequestAt);
     if (gap > 0) await sleep(gap);
     lastRequestAt = Date.now();
     try {
@@ -138,18 +138,17 @@ async function walkFolder(batchId, subjectId, chapterId, seen, depth = 0) {
   const videosRaw = Array.isArray(response?.lectures) ? response.lectures : rows(data?.lectures);
   const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : rows(data?.pdfs);
   const children = Array.isArray(response?.subFolders) ? response.subFolders : rows(data?.subFolders);
-  const folders = [];
-  for (const child of children) {
+  const folders = await Promise.all(children.map(async child => {
     const childId = id(child);
-    if (!childId) continue;
+    if (!childId) return null;
     try {
       const nested = await walkFolder(batchId, subjectId, childId, seen, depth + 1);
-      folders.push({ id: childId, title: title(child), ...nested });
+      return { id: childId, title: title(child), ...nested };
     } catch (error) {
       console.warn("Folder load failed", batchId, childId, error.message);
-      folders.push({ id: childId, title: title(child), folders: [], videos: [], pdfs: [], loadError: error.message });
+      return { id: childId, title: title(child), folders: [], videos: [], pdfs: [], loadError: error.message };
     }
-  }
+  })).then(items => items.filter(Boolean));
   const videos = [];
   for (const item of videosRaw) {
     const enriched = normalizeResource(item, "video");
@@ -212,7 +211,7 @@ for (const batch of batches) {
     result.errors[batchId] = error.message;
     console.warn("Batch content failed after retries", batchId, error.message);
   }
-  await sleep(1500);
+  await sleep(300);
 }
 const totals = Object.values(result.batches).reduce((sum, batch) => {
   sum.subjects += (batch.subjects || []).length;
