@@ -75,7 +75,7 @@ function youtubeId(value) {
 }
 function videoInfo(item) {
   const qualities = [];
-  let streamUrl = "", videoId = "";
+  let streamUrl = "", downloadUrl = "", videoId = "";
   for (const link of (Array.isArray(item?.encrypted_links) ? item.encrypted_links : [])) {
     const url = decodeAppx(link.path) || decodeAppx(link.backup_url);
     if (url && /^https?:\/\//i.test(url) && !/\/hls-drm-/i.test(url)) {
@@ -89,6 +89,7 @@ function videoInfo(item) {
     const id = youtubeId(url);
     if (id) videoId ||= id;
     else if (/^https?:\/\//i.test(url) && !/\/hls-drm-/i.test(url)) {
+      if (key === "download_link" && !/\.m3u8(?:$|\?)/i.test(url)) downloadUrl ||= url;
       streamUrl ||= url;
       if (!qualities.some(q => q.url === url)) qualities.push({ quality: key === "file_link" ? "Default" : "Direct", url });
     }
@@ -104,7 +105,7 @@ function videoInfo(item) {
       ? raw + encodeURIComponent(token)
       : "https://appx-play.classx.co.in/combined-img-player?isMobile=true&token=" + encodeURIComponent(token);
   }
-  return { streamUrl, embedUrl: embedUrl || playerUrl, videoId, qualities };
+  return { streamUrl, downloadUrl, embedUrl: embedUrl || playerUrl, videoId, qualities };
 }
 
 function normalizeResource(item, kind) {
@@ -117,10 +118,12 @@ function normalizeResource(item, kind) {
     thumbnail: String(first(item?.thumbnail, item?.image, item?.image_url, "")),
     kind,
     streamUrl: String(first(item?.streamUrl, item?.stream_url, item?.url, derived.streamUrl, "")),
+    downloadUrl: String(first(item?.downloadUrl, item?.download_url, derived.downloadUrl, "")),
     embedUrl: String(first(item?.embedUrl, item?.embed_url, item?.playerUrl, item?.player_url, derived.embedUrl, "")),
     videoId: String(first(item?.videoId, item?.video_id, derived.videoId, "")),
     qualities: Array.isArray(item?.qualities) ? item.qualities : (derived.qualities || []),
-    pdfUrl: String(first(item?.pdfUrl, item?.pdf_url, item?.pdf_link, item?.file_link, item?.download_link, "")),
+    pdfUrl: decodeAppx(String(first(item?.pdfUrl, item?.pdf_url, item?.pdf_link, item?.file_link, item?.download_link, ""))),
+    downloadUrl: decodeAppx(String(first(item?.downloadUrl, item?.download_url, item?.pdfUrl, item?.pdf_url, item?.pdf_link, item?.file_link, item?.download_link, ""))),
     pdfKey: String(first(item?.pdfKey, item?.pdf_key, item?.pdf_encryption_key, item?.file_key, "")),
     raw: item
   };
