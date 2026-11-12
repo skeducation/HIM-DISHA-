@@ -165,26 +165,29 @@ async function buildBatch(batch) {
   const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
   const subjectResponse = await get("/api/disha/subjects?" + new URLSearchParams({ batchId }));
   const subjectRows = rows(subjectResponse?.data ?? subjectResponse);
-  const subjects = [];
-  for (const subject of subjectRows) {
+  const subjects = await Promise.all(subjectRows.map(async subject => {
     const subjectId = id(subject);
-    if (!subjectId) continue;
-    const chapterResponse = await get("/api/disha/chapters?" + new URLSearchParams({ batchId, subjectId }));
-    const chapterRows = rows(chapterResponse?.data ?? chapterResponse);
-    const chapters = [];
-    for (const chapter of chapterRows) {
-      const chapterId = id(chapter);
-      if (!chapterId) continue;
-      try {
-        const content = await walkFolder(batchId, subjectId, chapterId, new Set());
-        chapters.push({ id: chapterId, title: title(chapter), ...content });
-      } catch (error) {
-        console.warn("Chapter load failed", batchId, chapterId, error.message);
-        chapters.push({ id: chapterId, title: title(chapter), folders: [], videos: [], pdfs: [], loadError: error.message });
-      }
+    if (!subjectId) return null;
+    try {
+      const chapterResponse = await get("/api/disha/chapters?" + new URLSearchParams({ batchId, subjectId }));
+      const chapterRows = rows(chapterResponse?.data ?? chapterResponse);
+      const chapters = await Promise.all(chapterRows.map(async chapter => {
+        const chapterId = id(chapter);
+        if (!chapterId) return null;
+        try {
+          const content = await walkFolder(batchId, subjectId, chapterId, new Set());
+          return { id: chapterId, title: title(chapter), ...content };
+        } catch (error) {
+          console.warn("Chapter load failed", batchId, chapterId, error.message);
+          return { id: chapterId, title: title(chapter), folders: [], videos: [], pdfs: [], loadError: error.message };
+        }
+      }));
+      return { id: subjectId, title: title(subject), chapters: chapters.filter(Boolean) };
+    } catch (error) {
+      console.warn("Subject load failed", batchId, subjectId, error.message);
+      return { id: subjectId, title: title(subject), chapters: [], loadError: error.message };
     }
-    subjects.push({ id: subjectId, title: title(subject), chapters });
-  }
+  })).then(items => items.filter(Boolean));
   const totals = subjects.reduce((sum, subject) => {
     for (const chapter of subject.chapters) {
       const count = node => {
@@ -203,19 +206,23 @@ async function buildBatch(batch) {
 const source = JSON.parse(await readFile("public/disha-batches.json", "utf8"));
 const batches = rows(source?.data ?? source);
 const result = { success: true, generatedAt: new Date().toISOString(), batches: {}, errors: {} };
-for (const batch of batches) {
-  const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
-  if (!batchId) continue;
-  console.log("Fetching Disha content", batchId);
-  try {
-    result.batches[batchId] = await buildBatch(batch);
-  } catch (error) {
-    result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
-    result.errors[batchId] = error.message;
-    console.warn("Batch content failed after retries", batchId, error.message);
+let nextBatch = 0;
+const workerCount = Math.min(3, batches.length);
+await Promise.all(Array.from({ length: workerCount }, async () => {
+  while (nextBatch < batches.length) {
+    const batch = batches[nextBatch++];
+    const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
+    if (!batchId) continue;
+    console.log("Fetching Disha content", batchId);
+    try {
+      result.batches[batchId] = await buildBatch(batch);
+    } catch (error) {
+      result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
+      result.errors[batchId] = error.message;
+      console.warn("Batch content failed after retries", batchId, error.message);
+    }
   }
-  await sleep(300);
-}
+}));
 const totals = Object.values(result.batches).reduce((sum, batch) => {
   sum.subjects += (batch.subjects || []).length;
   sum.videos += batch.totals?.videos || 0;
