@@ -4,6 +4,7 @@ import { createDecipheriv } from "node:crypto";
 const API = "https://hrrydoc.vercel.app";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let lastRequestAt = 0;
+let blockedUntil = 0;
 
 function rows(value) {
   if (Array.isArray(value)) return value;
@@ -26,8 +27,8 @@ const first = (...values) => values.find(v => v !== undefined && v !== null && v
 async function get(path) {
   let lastError;
   for (let attempt = 1; attempt <= 7; attempt++) {
-    const gap = 350 - (Date.now() - lastRequestAt);
-    if (gap > 0) await sleep(gap);
+    const waitUntil = Math.max(blockedUntil, lastRequestAt + 1200);
+    if (waitUntil > Date.now()) await sleep(waitUntil - Date.now());
     lastRequestAt = Date.now();
     try {
       const response = await fetch(API + path, {
@@ -51,8 +52,9 @@ async function get(path) {
       const rateLimited = error.status === 429 || /429|rate.?limit|too many requests/i.test(error.message || "");
       if (attempt === 7) break;
       const delay = rateLimited
-        ? Math.max(error.retryAfter * 1000, Math.min(60000, 9000 * attempt))
-        : Math.min(12000, 1800 * attempt);
+        ? Math.max(error.retryAfter * 1000, Math.min(90000, 30000 * attempt))
+        : Math.min(20000, 3000 * attempt);
+      if (rateLimited) blockedUntil = Date.now() + delay;
       console.warn("Retry API", path, "attempt", attempt, "after", delay, "ms:", error.message);
       await sleep(delay);
     }
@@ -141,17 +143,18 @@ async function walkFolder(batchId, subjectId, chapterId, seen, depth = 0) {
   const videosRaw = Array.isArray(response?.lectures) ? response.lectures : rows(data?.lectures);
   const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : rows(data?.pdfs);
   const children = Array.isArray(response?.subFolders) ? response.subFolders : rows(data?.subFolders);
-  const folders = await Promise.all(children.map(async child => {
+  const folders = [];
+  for (const child of children) {
     const childId = id(child);
-    if (!childId) return null;
+    if (!childId) continue;
     try {
       const nested = await walkFolder(batchId, subjectId, childId, seen, depth + 1);
-      return { id: childId, title: title(child), ...nested };
+      folders.push({ id: childId, title: title(child), ...nested });
     } catch (error) {
       console.warn("Folder load failed", batchId, childId, error.message);
-      return { id: childId, title: title(child), folders: [], videos: [], pdfs: [], loadError: error.message };
+      folders.push({ id: childId, title: title(child), folders: [], videos: [], pdfs: [], loadError: error.message });
     }
-  })).then(items => items.filter(Boolean));
+  }
   const videos = [];
   for (const item of videosRaw) {
     const enriched = normalizeResource(item, "video");
@@ -165,29 +168,31 @@ async function buildBatch(batch) {
   const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
   const subjectResponse = await get("/api/disha/subjects?" + new URLSearchParams({ batchId }));
   const subjectRows = rows(subjectResponse?.data ?? subjectResponse);
-  const subjects = await Promise.all(subjectRows.map(async subject => {
+  const subjects = [];
+  for (const subject of subjectRows) {
     const subjectId = id(subject);
-    if (!subjectId) return null;
+    if (!subjectId) continue;
     try {
       const chapterResponse = await get("/api/disha/chapters?" + new URLSearchParams({ batchId, subjectId }));
       const chapterRows = rows(chapterResponse?.data ?? chapterResponse);
-      const chapters = await Promise.all(chapterRows.map(async chapter => {
+      const chapters = [];
+      for (const chapter of chapterRows) {
         const chapterId = id(chapter);
-        if (!chapterId) return null;
+        if (!chapterId) continue;
         try {
           const content = await walkFolder(batchId, subjectId, chapterId, new Set());
-          return { id: chapterId, title: title(chapter), ...content };
+          chapters.push({ id: chapterId, title: title(chapter), ...content });
         } catch (error) {
           console.warn("Chapter load failed", batchId, chapterId, error.message);
-          return { id: chapterId, title: title(chapter), folders: [], videos: [], pdfs: [], loadError: error.message };
+          chapters.push({ id: chapterId, title: title(chapter), folders: [], videos: [], pdfs: [], loadError: error.message });
         }
-      }));
-      return { id: subjectId, title: title(subject), chapters: chapters.filter(Boolean) };
+      }
+      subjects.push({ id: subjectId, title: title(subject), chapters });
     } catch (error) {
       console.warn("Subject load failed", batchId, subjectId, error.message);
-      return { id: subjectId, title: title(subject), chapters: [], loadError: error.message };
+      subjects.push({ id: subjectId, title: title(subject), chapters: [], loadError: error.message });
     }
-  })).then(items => items.filter(Boolean));
+  }
   const totals = subjects.reduce((sum, subject) => {
     for (const chapter of subject.chapters) {
       const count = node => {
@@ -206,23 +211,18 @@ async function buildBatch(batch) {
 const source = JSON.parse(await readFile("public/disha-batches.json", "utf8"));
 const batches = rows(source?.data ?? source);
 const result = { success: true, generatedAt: new Date().toISOString(), batches: {}, errors: {} };
-let nextBatch = 0;
-const workerCount = Math.min(3, batches.length);
-await Promise.all(Array.from({ length: workerCount }, async () => {
-  while (nextBatch < batches.length) {
-    const batch = batches[nextBatch++];
-    const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
-    if (!batchId) continue;
-    console.log("Fetching Disha content", batchId);
-    try {
-      result.batches[batchId] = await buildBatch(batch);
-    } catch (error) {
-      result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
-      result.errors[batchId] = error.message;
-      console.warn("Batch content failed after retries", batchId, error.message);
-    }
+for (const batch of batches) {
+  const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
+  if (!batchId) continue;
+  console.log("Fetching Disha content sequentially", batchId);
+  try {
+    result.batches[batchId] = await buildBatch(batch);
+  } catch (error) {
+    result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
+    result.errors[batchId] = error.message;
+    console.warn("Batch content failed after retries", batchId, error.message);
   }
-}));
+}
 const totals = Object.values(result.batches).reduce((sum, batch) => {
   sum.subjects += (batch.subjects || []).length;
   sum.videos += batch.totals?.videos || 0;
@@ -232,4 +232,4 @@ const totals = Object.values(result.batches).reduce((sum, batch) => {
 result.totals = { batches: Object.keys(result.batches).length, ...totals, failedBatches: Object.keys(result.errors).length };
 await writeFile("public/disha-content.json", JSON.stringify(result));
 console.log("Disha content snapshot complete", JSON.stringify(result.totals));
-if (result.totals.failedBatches === batches.length) throw new Error("No batch resources could be loaded; refusing to publish an empty snapshot.");
+if (result.totals.failedBatches > 0) throw new Error("Refusing to publish incomplete study data: " + result.totals.failedBatches + " batches failed.");
