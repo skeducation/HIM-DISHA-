@@ -194,6 +194,17 @@ export default function App() {
     if (activeSubject) { setActiveSubject(null); return; }
     setActiveBatch(null); setView("home");
   };
+  const openSubject = async subject => {
+    setActiveSubject({ ...subject, chapters: [] }); setActiveChapter(null); setFolderStack([]); setResourcesLoading(true);
+    try {
+      const batch = String(first(activeBatch?.id, activeBatch?.batch_id, activeBatch?.course_id, activeBatch?.batchId, ""));
+      const q = new URLSearchParams({ batchId: batch, subjectId: apiId(subject) });
+      const response = await apiGet("/api/disha/chapters?" + q);
+      const chapters = apiRows(response?.data ?? response).filter(x => apiId(x)).map(x => ({ ...x, id: apiId(x), title: apiTitle(x), folders: [], videos: [], pdfs: [] }));
+      setActiveSubject({ ...subject, chapters });
+    } catch (e) { setError("Chapters load नहीं हुए: " + e.message); }
+    finally { setResourcesLoading(false); }
+  };
   const openChapter = async chapter => {
     setActiveChapter({ ...chapter, folders: [], videos: [], pdfs: [] }); setFolderStack([]); setTab("videos"); setResourcesLoading(true);
     try {
@@ -270,7 +281,7 @@ export default function App() {
 
         {activeBatch && !activeSubject && <div className="folder-list">
           {!contentReady && <div className="empty">Resources लोड हो रहे हैं…</div>}
-          {contentReady && subjects.map(subject => <button className="folder" key={subject.id} onClick={() => setActiveSubject(subject)}>
+          {contentReady && subjects.map(subject => <button className="folder" key={subject.id} onClick={() => openSubject(subject)}>
             <span className="folder-icon"><Icon name="folder" /></span>
             <span><b>{title(subject)}</b><small>{(subject.chapters || []).length} chapters</small></span><span className="go">›</span>
           </button>)}
