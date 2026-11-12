@@ -5,6 +5,7 @@ const API = "https://hrrydoc.vercel.app";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let lastRequestAt = 0;
 let blockedUntil = 0;
+const MIN_GAP_MS = 500;
 
 function rows(value) {
   if (Array.isArray(value)) return value;
@@ -26,8 +27,8 @@ const first = (...values) => values.find(v => v !== undefined && v !== null && v
 
 async function get(path) {
   let lastError;
-  for (let attempt = 1; attempt <= 7; attempt++) {
-    const waitUntil = Math.max(blockedUntil, lastRequestAt + 1200);
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const waitUntil = Math.max(blockedUntil, lastRequestAt + MIN_GAP_MS);
     if (waitUntil > Date.now()) await sleep(waitUntil - Date.now());
     lastRequestAt = Date.now();
     try {
@@ -50,10 +51,10 @@ async function get(path) {
     } catch (error) {
       lastError = error;
       const rateLimited = error.status === 429 || /429|rate.?limit|too many requests/i.test(error.message || "");
-      if (attempt === 7) break;
+      if (attempt === 4) break;
       const delay = rateLimited
-        ? Math.max(error.retryAfter * 1000, Math.min(90000, 30000 * attempt))
-        : Math.min(20000, 3000 * attempt);
+        ? Math.max(error.retryAfter * 1000, Math.min(45000, 12000 * attempt))
+        : Math.min(12000, 2000 * attempt);
       if (rateLimited) blockedUntil = Date.now() + delay;
       console.warn("Retry API", path, "attempt", attempt, "after", delay, "ms:", error.message);
       await sleep(delay);
@@ -211,18 +212,36 @@ async function buildBatch(batch) {
 const source = JSON.parse(await readFile("public/disha-batches.json", "utf8"));
 const batches = rows(source?.data ?? source);
 const result = { success: true, generatedAt: new Date().toISOString(), batches: {}, errors: {} };
-for (const batch of batches) {
-  const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
-  if (!batchId) continue;
-  console.log("Fetching Disha content sequentially", batchId);
-  try {
-    result.batches[batchId] = await buildBatch(batch);
-  } catch (error) {
-    result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
-    result.errors[batchId] = error.message;
-    console.warn("Batch content failed after retries", batchId, error.message);
+let nextBatch = 0;
+async function batchWorker(workerId) {
+  while (true) {
+    const index = nextBatch++;
+    if (index >= batches.length) return;
+    const batch = batches[index];
+    const batchId = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
+    if (!batchId) continue;
+    console.log("Fetching Disha content", batchId, "worker", workerId);
+    try {
+      result.batches[batchId] = await buildBatch(batch);
+      delete result.errors[batchId];
+    } catch (error) {
+      result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
+      result.errors[batchId] = error.message;
+      console.warn("Batch content failed after retries", batchId, error.message);
+    }
+    // Persist progress so the workflow can still publish completed batches.
+    await writeFile("public/disha-content.json", JSON.stringify({
+      ...result,
+      totals: Object.values(result.batches).reduce((sum, item) => ({
+        batches: sum.batches + 1,
+        subjects: sum.subjects + (item.subjects || []).length,
+        videos: sum.videos + (item.totals?.videos || 0),
+        pdfs: sum.pdfs + (item.totals?.pdfs || 0)
+      }), { batches: 0, subjects: 0, videos: 0, pdfs: 0 })
+    }));
   }
 }
+await Promise.all([batchWorker(1), batchWorker(2)]);
 const totals = Object.values(result.batches).reduce((sum, batch) => {
   sum.subjects += (batch.subjects || []).length;
   sum.videos += batch.totals?.videos || 0;
@@ -232,4 +251,4 @@ const totals = Object.values(result.batches).reduce((sum, batch) => {
 result.totals = { batches: Object.keys(result.batches).length, ...totals, failedBatches: Object.keys(result.errors).length };
 await writeFile("public/disha-content.json", JSON.stringify(result));
 console.log("Disha content snapshot complete", JSON.stringify(result.totals));
-if (result.totals.failedBatches > 0) throw new Error("Refusing to publish incomplete study data: " + result.totals.failedBatches + " batches failed.");
+if (result.totals.failedBatches > 0) console.warn("Publishing completed batches; failed batches can be retried on the next scheduled build.");
