@@ -37,7 +37,7 @@ async function decodeAppx(value) {
 const ytId = value => {
   const s = String(value || "").trim();
   if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
-  return s.match(/(?:v=|youtu\\.be\\/|embed\\/|live\\/|shorts\\/)([A-Za-z0-9_-]{11})/)?.[1] || "";
+  return s.match(/(?:v=|youtu\.be\/|embed\/|live\/|shorts\/)([A-Za-z0-9_-]{11})/)?.[1] || "";
 };
 async function normalizeApiResource(item, kind) {
   const links = Array.isArray(item?.encrypted_links) ? item.encrypted_links : [];
@@ -45,15 +45,15 @@ async function normalizeApiResource(item, kind) {
   let streamUrl = "", downloadUrl = "", videoId = "";
   for (const link of links) {
     const url = await decodeAppx(link.path) || await decodeAppx(link.backup_url);
-    if (/^https?:\\/\\//i.test(url) && !/\\/hls-drm-/i.test(url)) {
+    if (/^https?:\/\//i.test(url) && !/\/hls-drm-/i.test(url)) {
       qualities.push({ quality: String(link.quality || "Auto"), url }); streamUrl ||= url;
     }
   }
   for (const key of ["download_link","download_link2","download_url_higher_version","download_url_lower_version","recording_hls","file_link"]) {
     const url = await decodeAppx(item?.[key]); if (!url) continue;
     const id = ytId(url); if (id) videoId ||= id;
-    else if (/^https?:\\/\\//i.test(url) && !/\\/hls-drm-/i.test(url)) {
-      if (key === "download_link" && !/\\.m3u8(?:$|\\?)/i.test(url)) downloadUrl ||= url;
+    else if (/^https?:\/\//i.test(url) && !/\/hls-drm-/i.test(url)) {
+      if (key === "download_link" && !/\.m3u8(?:$|\?)/i.test(url)) downloadUrl ||= url;
       streamUrl ||= url; if (!qualities.some(q => q.url === url)) qualities.push({ quality: "Direct", url });
     }
   }
