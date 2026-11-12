@@ -158,19 +158,10 @@ export default function App() {
       if (!response.ok) throw new Error("Batch snapshot HTTP " + response.status);
       const json = await response.json();
       const rows = listFrom(json?.data ?? json);
-      if (!rows.length) throw new Error("Batches API returned an empty list");
       setBatches(rows);
+      if (!rows.length) setError("अभी API से कोई batch उपलब्ध नहीं है। कृपया बाद में फिर कोशिश करें।");
     } catch (snapshotError) {
-      try {
-        const response = await fetch(API_URL, { headers: { Accept: "application/json" }, cache: "no-store" });
-        if (!response.ok) throw new Error("HTTP " + response.status);
-        const json = await response.json();
-        const rows = listFrom(json?.data ?? json);
-        if (!rows.length) throw new Error("Empty batch list");
-        setBatches(rows);
-      } catch (liveError) {
-        setError("Batches load नहीं हुए: " + (liveError?.message || snapshotError.message));
-      }
+      setError("Batch list load नहीं हुई: " + (snapshotError?.message || "Snapshot unavailable"));
     } finally { setLoading(false); }
   };
 
