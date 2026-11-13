@@ -5,7 +5,7 @@ const API = "https://hrrydoc.vercel.app";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let lastRequestAt = 0;
 let blockedUntil = 0;
-const MIN_GAP_MS = 500;
+const MIN_GAP_MS = 1000;
 let requestQueue = Promise.resolve();
 let progressQueue = Promise.resolve();
 async function persistProgress() {
