@@ -301,6 +301,13 @@ const cleanUrl = value => {
   return (match ? match[2] : value.trim()).replace(/&amp;/g, "&");
 };
 const imageOf = item => cleanUrl(first(item?.thumbnail, item?.thumbnailUrl, item?.thumbnail_url, item?.banner, item?.image, item?.imageUrl, ""));
+const hydrateSnapshotNode = node => ({
+  ...node,
+  folders: (node?.folders || []).map(hydrateSnapshotNode),
+  videos: node?.videos || [],
+  pdfs: node?.pdfs || [],
+  _loaded: true
+});
 const countTree = node => {
   let videos = (node?.videos || []).length, pdfs = (node?.pdfs || []).length;
   (node?.folders || []).forEach(folder => { const n = countTree(folder); videos += n.videos; pdfs += n.pdfs; });
@@ -422,17 +429,37 @@ export default function App() {
     try {
       const id = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
       if (!id) throw new Error("Batch ID उपलब्ध नहीं है");
-      let subjectRows = [];
-      try {
-        const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }), 5000);
-        subjectRows = apiRows(subjectResponse?.data ?? subjectResponse);
-      } catch {}
-      if (!subjectRows.length) subjectRows = await loadClassxSubjects(id);
-      const loadedSubjects = subjectRows.map(subject => ({
-        id: apiId(subject), title: apiTitle(subject), chapters: [], _chaptersLoaded: false
+      // Prefer the original-API snapshot generated during the GitHub Actions build.
+      // This avoids browser CORS failures and repeated slow subject/chapter requests.
+      const snapshot = await ensureContent().catch(() => null);
+      const savedBatch = snapshot?.batches?.[id];
+      const snapshotSubjects = Array.isArray(savedBatch?.subjects) ? savedBatch.subjects : [];
+      let loadedSubjects = snapshotSubjects.map(subject => ({
+        ...subject,
+        id: String(subject.id || ""),
+        title: String(subject.title || subject.name || "Untitled"),
+        chapters: (subject.chapters || []).map(hydrateSnapshotNode),
+        _chaptersLoaded: true
       })).filter(subject => subject.id);
+      if (!loadedSubjects.length) {
+        let subjectRows = [];
+        let originalApiError = "";
+        try {
+          const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }), 8000);
+          subjectRows = apiRows(subjectResponse?.data ?? subjectResponse);
+        } catch (apiError) { originalApiError = apiError?.message || String(apiError); }
+        if (!subjectRows.length) {
+          try { subjectRows = await loadClassxSubjects(id); }
+          catch (fallbackError) {
+            throw new Error("Original API: " + (originalApiError || "subjects list empty") + "; ClassX fallback: " + (fallbackError?.message || fallbackError));
+          }
+        }
+        loadedSubjects = subjectRows.map(subject => ({
+          id: apiId(subject), title: apiTitle(subject), chapters: [], _chaptersLoaded: false
+        })).filter(subject => subject.id);
+      }
       setSubjects(loadedSubjects);
-      if (!loadedSubjects.length) setError("इस Batch के लिए API से कोई Subject नहीं मिला। Retry करें।");
+      if (!loadedSubjects.length) setError("इस Batch के लिए Original API snapshot/API से कोई Subject नहीं मिला। Retry करें।");
     } catch (e) {
       setError("Subjects load नहीं हुए: " + e.message + " — Retry करें।");
     } finally { setResourcesLoading(false); }
