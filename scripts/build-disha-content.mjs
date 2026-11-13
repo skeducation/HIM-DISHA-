@@ -8,13 +8,6 @@ let blockedUntil = 0;
 const MIN_GAP_MS = 500;
 let requestQueue = Promise.resolve();
 let progressQueue = Promise.resolve();
-async function scheduleRequest() {
-  const scheduled = requestQueue.then(async () => {
-    await scheduleRequest();
-  });
-  requestQueue = scheduled.catch(() => {});
-  await scheduled;
-}
 async function persistProgress() {
   const totals = Object.values(result.batches).reduce((sum, item) => ({
     batches: sum.batches + 1,
@@ -22,6 +15,10 @@ async function persistProgress() {
     videos: sum.videos + (item.totals?.videos || 0),
     pdfs: sum.pdfs + (item.totals?.pdfs || 0)
   }), { batches: 0, subjects: 0, videos: 0, pdfs: 0 });
+  if (totals.subjects + totals.videos + totals.pdfs === 0) {
+    console.warn("No original content collected yet; preserving existing snapshot.");
+    return;
+  }
   const snapshot = JSON.stringify({ ...result, totals });
   progressQueue = progressQueue.then(() => writeFile("public/disha-content.json", snapshot));
   await progressQueue;
@@ -46,41 +43,56 @@ const title = x => String(x?.title ?? x?.Title ?? x?.name ?? x?.subject_name ?? 
 const first = (...values) => values.find(v => v !== undefined && v !== null && v !== "");
 
 async function get(path) {
-  let lastError;
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    const waitUntil = Math.max(blockedUntil, lastRequestAt + MIN_GAP_MS);
-    if (waitUntil > Date.now()) await sleep(waitUntil - Date.now());
-    lastRequestAt = Date.now();
-    try {
-      const response = await fetch(API + path, {
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-        signal: AbortSignal.timeout(25000)
-      });
-      const raw = await response.text();
-      let json;
-      try { json = JSON.parse(raw); } catch { throw new Error("Non-JSON response (HTTP " + response.status + "): " + raw.slice(0,120)); }
-      if (!response.ok || json?.success === false) {
-        const message = json?.error || json?.message || ("HTTP " + response.status);
-        const error = new Error(String(message));
-        error.status = response.status;
-        error.retryAfter = Number(response.headers.get("retry-after") || 0);
-        throw error;
+  const task = requestQueue.then(async () => {
+    let lastError;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const waitUntil = Math.max(blockedUntil, lastRequestAt + MIN_GAP_MS);
+      if (waitUntil > Date.now()) await sleep(waitUntil - Date.now());
+      lastRequestAt = Date.now();
+      try {
+        const response = await fetch(API + path, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          signal: AbortSignal.timeout(25000)
+        });
+        const raw = await response.text();
+        let json;
+        try { json = JSON.parse(raw); } catch {
+          const error = new Error("Non-JSON response (HTTP " + response.status + "): " + raw.slice(0,120));
+          error.status = response.status;
+          error.retryAfter = response.headers.get("retry-after") || "";
+          throw error;
+        }
+        if (!response.ok || json?.success === false) {
+          const error = new Error(String(json?.error || json?.message || ("HTTP " + response.status)));
+          error.status = response.status;
+          error.retryAfter = response.headers.get("retry-after") || "";
+          throw error;
+        }
+        return json;
+      } catch (error) {
+        lastError = error;
+        const rateLimited = error.status === 429 || /429|rate.?limit|too many requests/i.test(error.message || "");
+        if (attempt === 5) break;
+        let retryMs = 0;
+        if (error.retryAfter) {
+          const seconds = Number(error.retryAfter);
+          retryMs = Number.isFinite(seconds) && seconds > 0
+            ? seconds * 1000
+            : Math.max(0, Date.parse(error.retryAfter) - Date.now());
+        }
+        const delay = rateLimited
+          ? Math.max(retryMs, Math.min(90000, 15000 * attempt))
+          : Math.min(20000, 3000 * attempt);
+        if (rateLimited) blockedUntil = Date.now() + delay;
+        console.warn("Retry API", path, "attempt", attempt, "after", delay, "ms:", error.message);
+        await sleep(delay);
       }
-      return json;
-    } catch (error) {
-      lastError = error;
-      const rateLimited = error.status === 429 || /429|rate.?limit|too many requests/i.test(error.message || "");
-      if (attempt === 4) break;
-      const delay = rateLimited
-        ? Math.max(error.retryAfter * 1000, Math.min(45000, 12000 * attempt))
-        : Math.min(12000, 2000 * attempt);
-      if (rateLimited) blockedUntil = Date.now() + delay;
-      console.warn("Retry API", path, "attempt", attempt, "after", delay, "ms:", error.message);
-      await sleep(delay);
     }
-  }
-  throw lastError || new Error("API request failed");
+    throw lastError || new Error("API request failed");
+  });
+  requestQueue = task.catch(() => {});
+  return task;
 }
 
 function decodeAppx(value) {
@@ -235,7 +247,17 @@ async function buildBatch(batch) {
 
 const source = JSON.parse(await readFile("public/disha-batches.json", "utf8"));
 const batches = rows(source?.data ?? source);
-const result = { success: true, generatedAt: new Date().toISOString(), batches: {}, errors: {} };
+let previousSnapshot = {};
+try {
+  previousSnapshot = JSON.parse(await readFile("public/disha-content.json", "utf8"));
+} catch {}
+const result = {
+  ...previousSnapshot,
+  success: true,
+  generatedAt: new Date().toISOString(),
+  batches: { ...(previousSnapshot.batches || {}) },
+  errors: {}
+};
 let nextBatch = 0;
 async function batchWorker(workerId) {
   while (true) {
@@ -246,10 +268,19 @@ async function batchWorker(workerId) {
     if (!batchId) continue;
     console.log("Fetching Disha content", batchId, "worker", workerId);
     try {
-      result.batches[batchId] = await buildBatch(batch);
+      const fresh = await buildBatch(batch);
+      const hasFreshContent = (fresh.subjects || []).length > 0;
+      const previous = result.batches[batchId];
+      if (hasFreshContent || !previous || !(previous.subjects || []).length) {
+        result.batches[batchId] = fresh;
+      } else {
+        console.warn("API returned zero subjects; preserving previous valid snapshot for batch", batchId);
+      }
       delete result.errors[batchId];
     } catch (error) {
-      result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
+      if (!result.batches[batchId]) {
+        result.batches[batchId] = { subjects: [], totals: { videos: 0, pdfs: 0 } };
+      }
       result.errors[batchId] = error.message;
       console.warn("Batch content failed after retries", batchId, error.message);
     }
@@ -257,7 +288,7 @@ async function batchWorker(workerId) {
     await persistProgress();
   }
 }
-await Promise.all([batchWorker(1), batchWorker(2)]);
+await batchWorker(1);
 const totals = Object.values(result.batches).reduce((sum, batch) => {
   sum.subjects += (batch.subjects || []).length;
   sum.videos += batch.totals?.videos || 0;
