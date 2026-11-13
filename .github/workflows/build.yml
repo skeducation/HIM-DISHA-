@@ -62,10 +62,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Prepare study content placeholder
-        run: |
-          mkdir -p public
-          printf '%s' '{"success":true,"batches":{},"errors":{},"notice":"Study content snapshot is temporarily unavailable while the source API is rate-limiting requests."}' > public/disha-content.json
+      - name: Build original study content snapshot
+        continue-on-error: true
+        run: node scripts/build-disha-content.mjs
       - name: Install dependencies
         run: npm install
       - name: Build website
