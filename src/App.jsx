@@ -4,6 +4,159 @@ const BASE = import.meta.env.BASE_URL;
 const API_URL = "https://hrrydoc.vercel.app/api/disha/batches";
 const TELEGRAM_URL = "https://t.me/HIMAPPS";
 const DishaAPI = "https://hrrydoc.vercel.app";
+const CLASSX_API = "https://dishaonlineclassesapi.classx.co.in";
+const classxCache = new Map();
+const classxInflight = new Map();
+let classxLastCall = 0;
+const classxCourseId = value => {
+  const id = String(value || "").trim();
+  return id === "88" ? "58" : id === "91" ? "61" : id;
+};
+async function classxGet(path, courseId = "", ttl = 45000) {
+  const key = String(courseId || "public") + ":" + path;
+  const cached = classxCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.data;
+  if (classxInflight.has(key)) return classxInflight.get(key);
+  const task = (async () => {
+    let lastError;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const gap = Date.now() - classxLastCall;
+      if (gap < 450) await new Promise(resolve => setTimeout(resolve, 450 - gap));
+      classxLastCall = Date.now();
+      try {
+        let credentials = null;
+        try { credentials = JSON.parse(localStorage.getItem("disha_user_creds") || "null"); } catch {}
+        const headers = {
+          "Auth-Key": "appxapi",
+          "Client-Service": "Appx",
+          source: "website",
+          ...(credentials?.token && credentials?.userId ? { Authorization: credentials.token, "User-ID": String(credentials.userId) } : {})
+        };
+        const response = await fetch(CLASSX_API + path, { headers, cache: "no-store" });
+        if (response.status === 429 || response.status >= 500) {
+          lastError = new Error("ClassX API HTTP " + response.status);
+          if (attempt < 4) { await new Promise(resolve => setTimeout(resolve, 600 * attempt)); continue; }
+          break;
+        }
+        if (!response.ok) throw new Error("ClassX API HTTP " + response.status);
+        const raw = await response.text();
+        if (raw.trim().startsWith("Too Many Requests")) {
+          lastError = new Error("ClassX API rate limit");
+          if (attempt < 4) { await new Promise(resolve => setTimeout(resolve, 700 * attempt)); continue; }
+          break;
+        }
+        const json = JSON.parse(raw);
+        if (ttl > 0 && json?.data && (Array.isArray(json.data) ? json.data.length : typeof json.data === "object")) {
+          classxCache.set(key, { data: json, expires: Date.now() + ttl });
+        }
+        return json;
+      } catch (error) {
+        lastError = error;
+        if (attempt === 4 || /Failed to fetch|Load failed|NetworkError/i.test(error.message || "")) break;
+        await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+      }
+    }
+    if (/Failed to fetch|Load failed|NetworkError/i.test(lastError?.message || "")) {
+      throw new Error("ClassX API browser access/CORS blocked. " + lastError.message);
+    }
+    throw lastError || new Error("ClassX API unavailable");
+  })().finally(() => classxInflight.delete(key));
+  classxInflight.set(key, task);
+  return task;
+}
+async function loadClassxSubjects(batchId) {
+  const courseId = classxCourseId(batchId);
+  let folders = [];
+  const cachedRoot = classxCache.get("root-folder:" + courseId)?.data;
+  if (cachedRoot) folders = cachedRoot;
+  if (!folders.length) {
+    const response = await classxGet("/get/folder_contentsv2?course_id=" + encodeURIComponent(courseId) + "&parent_id=-1", courseId, 1800000);
+    const rows = Array.isArray(response?.data) ? response.data : [];
+    folders = rows.filter(item => String(item?.material_type || "").toUpperCase() === "FOLDER");
+    if (folders.length === 1 && rows.length === 1) {
+      const rootId = String(folders[0].id || "");
+      if (rootId) {
+        const nested = await classxGet("/get/folder_contentsv2?course_id=" + encodeURIComponent(courseId) + "&parent_id=" + encodeURIComponent(rootId), courseId);
+        const sub = (Array.isArray(nested?.data) ? nested.data : []).filter(item => String(item?.material_type || "").toUpperCase() === "FOLDER");
+        if (sub.length) folders = sub;
+      }
+    }
+    classxCache.set("root-folder:" + courseId, { data: folders, expires: Date.now() + 1800000 });
+  }
+  return folders.map(item => ({
+    id: String(item.id || ""),
+    title: String(item.Title || item.title || item.subject_name || item.name || "Untitled"),
+    image: item.thumbnail || item.subject_logo || ""
+  })).filter(item => item.id);
+}
+async function loadClassxChapters(batchId, subjectId) {
+  const courseId = classxCourseId(batchId);
+  const response = await classxGet("/get/folder_contentsv2?course_id=" + encodeURIComponent(courseId) + "&parent_id=" + encodeURIComponent(subjectId), courseId);
+  const rows = Array.isArray(response?.data) ? response.data : [];
+  const folders = rows.filter(item => String(item?.material_type || "").toUpperCase() === "FOLDER");
+  const files = rows.filter(item => String(item?.material_type || "").toUpperCase() !== "FOLDER");
+  const chapters = folders.map(item => ({
+    id: String(item.id || ""),
+    title: String(item.Title || item.title || item.topic_name || item.name || "Untitled"),
+    image: item.thumbnail || ""
+  })).filter(item => item.id);
+  if (files.length) chapters.unshift({
+    id: String(subjectId),
+    title: "Lectures & Notes",
+    image: ""
+  });
+  return chapters;
+}
+async function normalizeClassxResource(item, kind) {
+  const mapped = {
+    ...item,
+    id: String(item?.id || item?.lecture_id || item?.file_id || ""),
+    title: String(item?.Title || item?.title || item?.name || "Untitled"),
+    pdfUrl: item?.pdfUrl || item?.pdf_url || item?.pdf_link || item?.pdf_link2 || "",
+    file_link: item?.file_link || "",
+    video_id: item?.video_id || "",
+    encrypted_links: Array.isArray(item?.encrypted_links) ? item.encrypted_links : []
+  };
+  const normalized = await normalizeApiResource(mapped, kind);
+  const pdfRaw = item?.pdf_link || item?.pdf_link2 || item?.pdf_url || item?.file_link || "";
+  const pdfUrl = await decodeAppx(pdfRaw);
+  const pdfKey = await decodeAppx(item?.pdf_encryption_key || item?.pdf2_encryption_key || "");
+  return {
+    ...normalized,
+    id: mapped.id,
+    title: mapped.title,
+    pdfUrl: /^https?:\/\//i.test(pdfUrl) ? pdfUrl : normalized.pdfUrl,
+    pdfKey,
+    isPdfEncrypted: String(item?.is_pdf_encrypted ?? item?.is_pdf2_encrypted ?? "0") !== "0"
+  };
+}
+async function loadClassxFolderTree(batchId, subjectId, chapterId, depth = 0, seen = new Set()) {
+  const courseId = classxCourseId(batchId);
+  if (!chapterId || depth > 10 || seen.has(String(chapterId))) return { id: chapterId, folders: [], videos: [], pdfs: [] };
+  seen.add(String(chapterId));
+  const response = await classxGet("/get/folder_contentsv2?course_id=" + encodeURIComponent(courseId) + "&parent_id=" + encodeURIComponent(chapterId), courseId);
+  const rows = Array.isArray(response?.data) ? response.data : [];
+  const folderRows = rows.filter(item => String(item?.material_type || "").toUpperCase() === "FOLDER");
+  const fileRows = rows.filter(item => String(item?.material_type || "").toUpperCase() !== "FOLDER");
+  const folders = [];
+  for (const folder of folderRows) {
+    const id = String(folder.id || "");
+    if (!id) continue;
+    const tree = await loadClassxFolderTree(batchId, subjectId, id, depth + 1, seen);
+    folders.push({ id, title: String(folder.Title || folder.title || folder.name || "Folder"), ...tree });
+  }
+  const videos = [];
+  const pdfs = [];
+  for (const item of fileRows) {
+    const kind = String(item?.material_type || "").toUpperCase();
+    if (kind === "PDF" || (!item?.video_id && !item?.file_link && (item?.pdf_link || item?.pdf_link2))) {
+      pdfs.push(await normalizeClassxResource(item, "pdf"));
+    } else {
+      videos.push(await normalizeClassxResource(item, "video"));
+    }
+  }
+  return { id: chapterId, folders, videos: videos.filter(item => item.id), pdfs: pdfs.filter(item => item.id || item.pdfUrl) };
+}
 const apiRows = value => {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== "object") return [];
@@ -90,16 +243,25 @@ async function normalizeApiResource(item, kind) {
 async function loadFolderTree(batchId, subjectId, chapterId, depth = 0, seen = new Set()) {
   if (!chapterId || depth > 10 || seen.has(String(chapterId))) return { id: chapterId, folders: [], videos: [], pdfs: [] };
   seen.add(String(chapterId));
-  const q = new URLSearchParams({ batchId, subjectId, chapterId });
-  const response = await apiGet("/api/disha/lectures?" + q);
-  const data = response?.data && typeof response.data === "object" ? response.data : response;
-  const videosRaw = Array.isArray(response?.lectures) ? response.lectures : apiRows(data?.lectures);
-  const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : apiRows(data?.pdfs);
-  const children = Array.isArray(response?.subFolders) ? response.subFolders : apiRows(data?.subFolders);
-  const folders = await Promise.all(children.map(async child => ({ id: apiId(child), title: apiTitle(child), ...await loadFolderTree(batchId, subjectId, apiId(child), depth + 1, seen) })));
-  const videos = await Promise.all(videosRaw.map(item => normalizeApiResource(item, "video")));
-  const pdfs = await Promise.all(pdfsRaw.map(item => normalizeApiResource(item, "pdf")));
-  return { id: chapterId, folders, videos: videos.filter(x => x.id), pdfs: pdfs.filter(x => x.id || x.pdfUrl) };
+  try {
+    const q = new URLSearchParams({ batchId, subjectId, chapterId });
+    const response = await apiGet("/api/disha/lectures?" + q);
+    const data = response?.data && typeof response.data === "object" ? response.data : response;
+    const videosRaw = Array.isArray(response?.lectures) ? response.lectures : apiRows(data?.lectures);
+    const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : apiRows(data?.pdfs);
+    const children = Array.isArray(response?.subFolders) ? response.subFolders : apiRows(data?.subFolders);
+    if (videosRaw.length || pdfsRaw.length || children.length) {
+      const folders = [];
+      for (const child of children) {
+        const childId = apiId(child);
+        if (childId) folders.push({ id: childId, title: apiTitle(child), ...await loadFolderTree(batchId, subjectId, childId, depth + 1, seen) });
+      }
+      const videos = await Promise.all(videosRaw.map(item => normalizeApiResource(item, "video")));
+      const pdfs = await Promise.all(pdfsRaw.map(item => normalizeApiResource(item, "pdf")));
+      return { id: chapterId, folders, videos: videos.filter(x => x.id), pdfs: pdfs.filter(x => x.id || x.pdfUrl) };
+    }
+  } catch {}
+  return loadClassxFolderTree(batchId, subjectId, chapterId, depth, new Set());
 }
 const first = (...values) => values.find(value => value !== undefined && value !== null && value !== "");
 const txt = (value, fallback = "") => typeof value === "string" || typeof value === "number" ? String(value) : fallback;
@@ -175,9 +337,23 @@ export default function App() {
       const response = await fetch(BASE + "disha-batches.json", { cache: "no-store" });
       if (!response.ok) throw new Error("Batch snapshot HTTP " + response.status);
       const json = await response.json();
-      const rows = listFrom(json?.data ?? json);
+      let rows = listFrom(json?.data ?? json);
+      if (!rows.length) {
+        const classx = await classxGet("/get/courselistnewv2?exam_name=&start=-1&userid=0");
+        rows = (Array.isArray(classx?.data) ? classx.data : [])
+          .filter(item => String(item?.type || "COURSE").toUpperCase() === "COURSE" && item?.id)
+          .map(item => ({
+            id: String(item.id),
+            name: String(item.course_name || item.name || "Untitled"),
+            title: String(item.course_name || item.name || "Untitled"),
+            thumbnail: item.course_thumbnail || item.thumbnail || "",
+            description: item.course_description || "",
+            validity: item.validity || "12 Months",
+            group: item.class || item.exam_name || item.category || ""
+          }));
+      }
       setBatches(rows);
-      if (!rows.length) setError("अभी API से कोई batch उपलब्ध नहीं है। कृपया बाद में फिर कोशिश करें।");
+      if (!rows.length) setError("अभी API से कोई Batch उपलब्ध नहीं है। Retry करें।");
     } catch (snapshotError) {
       setError("Batch list load नहीं हुई: " + (snapshotError?.message || "Snapshot unavailable"));
     } finally { setLoading(false); }
@@ -214,14 +390,22 @@ export default function App() {
     try {
       const id = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
       if (!id) throw new Error("Batch ID उपलब्ध नहीं है");
-      const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }));
-      const subjectRows = apiRows(subjectResponse?.data ?? subjectResponse);
+      let subjectRows = [];
+      try {
+        const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }));
+        subjectRows = apiRows(subjectResponse?.data ?? subjectResponse);
+      } catch {}
+      if (!subjectRows.length) subjectRows = await loadClassxSubjects(id);
       const loadedSubjects = [];
       for (const subject of subjectRows) {
         const subjectId = apiId(subject);
         if (!subjectId) continue;
-        const chapterResponse = await apiGet("/api/disha/chapters?" + new URLSearchParams({ batchId: id, subjectId }));
-        const chapterRows = apiRows(chapterResponse?.data ?? chapterResponse);
+        let chapterRows = [];
+        try {
+          const chapterResponse = await apiGet("/api/disha/chapters?" + new URLSearchParams({ batchId: id, subjectId }));
+          chapterRows = apiRows(chapterResponse?.data ?? chapterResponse);
+        } catch {}
+        if (!chapterRows.length) chapterRows = await loadClassxChapters(id, subjectId);
         const chapters = [];
         for (const chapter of chapterRows) {
           const chapterId = apiId(chapter);
