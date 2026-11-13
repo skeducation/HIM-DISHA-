@@ -497,16 +497,28 @@ export default function App() {
           const folderId = String(first(currentFolder?.id, activeChapter?.id, ""));
           if (!folderId || !item.title) throw new Error("PDF का folder ID या title उपलब्ध नहीं है");
           const params = new URLSearchParams({ folder: folderId, title: String(item.title) });
-          const response = await fetch("https://tik-reels.vercel.app/api/pdf?" + params, {
-            headers: { Accept: "application/json" },
-            signal: AbortSignal.timeout(15000),
-            cache: "no-store"
-          });
-          const data = await response.json().catch(() => null);
-          if (!response.ok || data?.ok !== true || !/^https?:\/\//i.test(String(data?.url || ""))) {
-            throw new Error(data?.message || "Original PDF provider से valid link नहीं मिला");
+          const pdfApis = ["/api/pdf", "https://tik-reels.vercel.app/api/pdf"];
+          let resolved = "";
+          let lastPdfError = "PDF provider से valid link नहीं मिला";
+          for (const base of pdfApis) {
+            try {
+              const response = await fetch(base + "?" + params, {
+                headers: { Accept: "application/json" },
+                signal: AbortSignal.timeout(15000),
+                cache: "no-store"
+              });
+              const data = await response.json().catch(() => null);
+              if (!response.ok || data?.ok !== true || !/^https?:\/\//i.test(String(data?.url || ""))) {
+                throw new Error(data?.message || "PDF API HTTP " + response.status);
+              }
+              resolved = cleanUrl(data.url);
+              break;
+            } catch (pdfError) {
+              lastPdfError = pdfError?.message || String(pdfError);
+            }
           }
-          url = cleanUrl(data.url);
+          if (!resolved) throw new Error(lastPdfError);
+          url = resolved;
         }
         if (!/^https?:\/\//i.test(url)) throw new Error("PDF URL उपलब्ध नहीं है");
         setPlayer({ kind: "pdf", item, url, downloadUrl: cleanUrl(item.downloadUrl || item.download_url || url), loading: false });
@@ -526,20 +538,28 @@ export default function App() {
   };
   const downloadPdf = async () => {
     if (!player?.url) return;
+    // Open a tab synchronously so the browser does not block the fallback after the fetch.
+    const fallbackTab = window.open("about:blank", "_blank");
+    if (fallbackTab) fallbackTab.opener = null;
     try {
-      const response = await fetch(player.url, { signal: AbortSignal.timeout(20000) });
+      const response = await fetch(player.url, { signal: AbortSignal.timeout(20000), cache: "no-store" });
       if (!response.ok) throw new Error("PDF download HTTP " + response.status);
       const blob = await response.blob();
+      if (!blob.size) throw new Error("PDF file is empty");
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = objectUrl;
-      anchor.download = (title(player.item) || "study-material") + ".pdf";
+      anchor.download = (title(player.item) || "study-material").replace(/[\\/:*?"<>|]/g, "-") + ".pdf";
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+      if (fallbackTab) fallbackTab.close();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
     } catch {
-      window.open(player.url, "_blank", "noopener,noreferrer");
+      // Cross-origin PDF hosts may block fetch; open the original PDF so Chrome's
+      // built-in PDF viewer can still save/download it.
+      if (fallbackTab) fallbackTab.location.href = player.url;
+      else window.open(player.url, "_blank", "noopener,noreferrer");
     }
   };
   const subjectsCount = subjects.length;
@@ -652,7 +672,7 @@ export default function App() {
     {player && <div className="viewer-overlay open" onClick={event => { if (event.target === event.currentTarget) setPlayer(null); }}>
       <section className="viewer-dialog" role="dialog" aria-modal="true">
         <header className="viewer-header"><b className="viewer-title">{title(player.item)}</b><button className="viewer-close" onClick={() => setPlayer(null)} aria-label="Close">✕</button></header>
-        {player.kind === "pdf" ? (player.loading ? <div className="empty">Original PDF link लोड हो रहा है…</div> : player.url ? <iframe className="viewer-frame" title="PDF viewer" src={player.url} /> : <div className="empty">{player.error || "इस PDF का valid URL API ने नहीं दिया।"}</div>) : player.url ? (/\.m3u8|\.mp4|\.webm/i.test(player.url) ? <video className="viewer-frame" controls playsInline src={player.url} /> : <iframe className="viewer-frame" title="Video player" src={player.url} allow="autoplay; fullscreen; picture-in-picture" allowFullScreen />) : <div className="empty">इस video का playback URL उपलब्ध नहीं है।</div>}
+        {player.kind === "pdf" ? (player.loading ? <div className="empty">Original PDF link लोड हो रहा है…</div> : player.url ? <iframe className="viewer-frame" title="PDF viewer" src={player.url} /> : <div className="empty">{player.error || "इस PDF का valid URL API ने नहीं दिया।"}</div>) : player.url ? (/\.m3u8|\.mp4|\.webm/i.test(player.url) ? <video className="viewer-frame" controls playsInline src={player.url} /> : <iframe className="viewer-frame" title="Video player" src={player.url} allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" loading="eager" />) : <div className="empty">इस video का playback URL उपलब्ध नहीं है।</div>}
         {player.kind === "pdf" && player.url && <div className="viewer-header"><a href={player.url} target="_blank" rel="noreferrer">Open PDF ↗</a><button type="button" onClick={downloadPdf}>Download PDF ↓</button></div>}
         {player.kind === "video" && player.downloadUrl && <div className="viewer-header"><a href={player.downloadUrl} target="_blank" rel="noreferrer" download>Download original video ↓</a></div>}
       </section>
