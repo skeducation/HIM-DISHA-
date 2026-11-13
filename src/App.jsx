@@ -18,11 +18,29 @@ const apiRows = value => {
 const apiId = x => String(x?.id ?? x?.folder_id ?? x?.folderId ?? x?.chapter_id ?? x?.subject_id ?? x?.lecture_id ?? x?.file_id ?? "");
 const apiTitle = x => String(x?.title ?? x?.Title ?? x?.name ?? x?.subject_name ?? x?.topic_name ?? x?.file_name ?? "Untitled");
 async function apiGet(path) {
-  const response = await fetch(DishaAPI + path, { headers: { Accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) throw new Error("API HTTP " + response.status);
-  const json = await response.json();
-  if (json?.success === false) throw new Error(json.error || json.message || "API error");
-  return json;
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const response = await fetch(DishaAPI + path, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (response.status === 429 || response.status >= 500) {
+        const error = new Error("API HTTP " + response.status);
+        if (attempt === 3) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(30000, 3000 * (attempt + 1))));
+        lastError = error;
+        continue;
+      }
+      if (!response.ok) throw new Error("API HTTP " + response.status);
+      const json = await response.json();
+      if (json?.success === false) throw new Error(json.error || json.message || "API error");
+      return json;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 3) break;
+      if (!/429|5\d\d|fetch/i.test(error.message || "")) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(30000, 3000 * (attempt + 1))));
+    }
+  }
+  throw lastError || new Error("API request failed");
 }
 async function decodeAppx(value) {
   if (!value || typeof value !== "string" || !value.includes(":") || value.startsWith("http")) return String(value || "").trim();
@@ -196,12 +214,29 @@ export default function App() {
     try {
       const id = String(first(batch?.id, batch?.batch_id, batch?.course_id, batch?.batchId, ""));
       if (!id) throw new Error("Batch ID उपलब्ध नहीं है");
-      const content = await ensureContent();
-      const rows = content.batches?.[id]?.subjects || [];
-      setSubjects(rows);
-      if (!rows.length) setError(content.errors?.[id] || "इस Batch का Original Study Content snapshot में उपलब्ध नहीं है।");
-    } catch (e) { setError("Study material load नहीं हुआ: " + e.message); }
-    finally { setResourcesLoading(false); }
+      const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }));
+      const subjectRows = apiRows(subjectResponse?.data ?? subjectResponse);
+      const loadedSubjects = [];
+      for (const subject of subjectRows) {
+        const subjectId = apiId(subject);
+        if (!subjectId) continue;
+        const chapterResponse = await apiGet("/api/disha/chapters?" + new URLSearchParams({ batchId: id, subjectId }));
+        const chapterRows = apiRows(chapterResponse?.data ?? chapterResponse);
+        const chapters = [];
+        for (const chapter of chapterRows) {
+          const chapterId = apiId(chapter);
+          if (!chapterId) continue;
+          const tree = await loadFolderTree(id, subjectId, chapterId);
+          chapters.push({ id: chapterId, title: apiTitle(chapter), ...tree });
+        }
+        loadedSubjects.push({ id: subjectId, title: apiTitle(subject), chapters });
+        setSubjects([...loadedSubjects]);
+      }
+      setSubjects(loadedSubjects);
+      if (!loadedSubjects.length) setError("इस Batch के लिए API से कोई Subject नहीं मिला। Retry करें।");
+    } catch (e) {
+      setError("Original Study Content API से load नहीं हुआ: " + e.message + " — Retry करें।");
+    } finally { setResourcesLoading(false); }
   };
   const back = () => {
     if (player) { setPlayer(null); return; }
