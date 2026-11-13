@@ -138,13 +138,14 @@ async function loadClassxFolderTree(batchId, subjectId, chapterId, depth = 0, se
   const rows = Array.isArray(response?.data) ? response.data : [];
   const folderRows = rows.filter(item => String(item?.material_type || "").toUpperCase() === "FOLDER");
   const fileRows = rows.filter(item => String(item?.material_type || "").toUpperCase() !== "FOLDER");
-  const folders = [];
-  for (const folder of folderRows) {
-    const id = String(folder.id || "");
-    if (!id) continue;
-    const tree = await loadClassxFolderTree(batchId, subjectId, id, depth + 1, seen);
-    folders.push({ id, title: String(folder.Title || folder.title || folder.name || "Folder"), ...tree });
-  }
+  const folders = folderRows.map(folder => ({
+    id: String(folder.id || ""),
+    title: String(folder.Title || folder.title || folder.name || "Folder"),
+    folders: [],
+    videos: [],
+    pdfs: [],
+    _loaded: false
+  })).filter(folder => folder.id);
   const videos = [];
   const pdfs = [];
   for (const item of fileRows) {
@@ -251,11 +252,14 @@ async function loadFolderTree(batchId, subjectId, chapterId, depth = 0, seen = n
     const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : apiRows(data?.pdfs);
     const children = Array.isArray(response?.subFolders) ? response.subFolders : apiRows(data?.subFolders);
     if (videosRaw.length || pdfsRaw.length || children.length) {
-      const folders = [];
-      for (const child of children) {
-        const childId = apiId(child);
-        if (childId) folders.push({ id: childId, title: apiTitle(child), ...await loadFolderTree(batchId, subjectId, childId, depth + 1, seen) });
-      }
+      const folders = children.map(child => ({
+        id: apiId(child),
+        title: apiTitle(child),
+        folders: [],
+        videos: [],
+        pdfs: [],
+        _loaded: false
+      })).filter(folder => folder.id);
       const videos = await Promise.all(videosRaw.map(item => normalizeApiResource(item, "video")));
       const pdfs = await Promise.all(pdfsRaw.map(item => normalizeApiResource(item, "pdf")));
       return { id: chapterId, folders, videos: videos.filter(x => x.id), pdfs: pdfs.filter(x => x.id || x.pdfUrl) };
@@ -453,7 +457,23 @@ export default function App() {
   const openChapter = chapter => {
     setActiveChapter(chapter); setFolderStack([chapter]); setTab("videos"); setError("");
   };
-  const openFolder = folder => setFolderStack(stack => [...stack, folder]);
+  const openFolder = async folder => {
+    if (folder?._loaded) {
+      setFolderStack(stack => [...stack, folder]);
+      return;
+    }
+    setResourcesLoading(true);
+    setError("");
+    try {
+      const tree = await loadFolderTree(batchId, activeSubject?.id || "", folder.id);
+      setFolderStack(stack => [...stack, { ...folder, ...tree, _loaded: true }]);
+    } catch (e) {
+      setError("Folder का material load नहीं हुआ: " + (e?.message || "API error"));
+      setFolderStack(stack => [...stack, folder]);
+    } finally {
+      setResourcesLoading(false);
+    }
+  };
   const openItem = item => {
     if (isPdf(item)) {
       const url = cleanUrl(item.pdfUrl || item.pdf_url || item.url);
