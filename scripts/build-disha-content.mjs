@@ -160,10 +160,14 @@ async function walkFolder(batchId, subjectId, chapterId, seen, depth = 0) {
   seen.add(key);
   const query = new URLSearchParams({ batchId, subjectId, chapterId });
   const response = await get("/api/disha/lectures?" + query);
-  const data = response?.data && typeof response.data === "object" ? response.data : response;
-  const videosRaw = Array.isArray(response?.lectures) ? response.lectures : rows(data?.lectures);
-  const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : rows(data?.pdfs);
-  const children = Array.isArray(response?.subFolders) ? response.subFolders : rows(data?.subFolders);
+  const data = response?.data && typeof response.data === "object" && !Array.isArray(response.data) ? response.data : response;
+  const flatRows = Array.isArray(response?.data) ? response.data : rows(response?.data ?? response);
+  const typeOf = item => String(item?.material_type ?? item?.type ?? item?.content_type ?? item?.file_type ?? "").trim().toUpperCase();
+  const isFolder = item => typeOf(item) === "FOLDER" || typeOf(item) === "DIR";
+  const isPdf = item => /PDF|DOCUMENT|NOTE/.test(typeOf(item)) || Boolean(first(item?.pdf_link, item?.pdf_link2, item?.pdf_url, item?.pdfUrl)) && !first(item?.video_id, item?.video_player_token, item?.asset);
+  const videosRaw = Array.isArray(response?.lectures) ? response.lectures : rows(data?.lectures).length ? rows(data.lectures) : flatRows.filter(item => !isFolder(item) && !isPdf(item));
+  const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : rows(data?.pdfs).length ? rows(data.pdfs) : flatRows.filter(isPdf);
+  const children = Array.isArray(response?.subFolders) ? response.subFolders : rows(data?.subFolders).length ? rows(data.subFolders) : flatRows.filter(isFolder);
   const folders = [];
   for (const child of children) {
     const childId = id(child);
@@ -261,6 +265,10 @@ const totals = Object.values(result.batches).reduce((sum, batch) => {
   return sum;
 }, { subjects: 0, videos: 0, pdfs: 0 });
 result.totals = { batches: Object.keys(result.batches).length, ...totals, failedBatches: Object.keys(result.errors).length };
-await writeFile("public/disha-content.json", JSON.stringify(result));
-console.log("Disha content snapshot complete", JSON.stringify(result.totals));
+if (result.totals.subjects + result.totals.videos + result.totals.pdfs > 0) {
+  await writeFile("public/disha-content.json", JSON.stringify(result));
+  console.log("Disha content snapshot complete", JSON.stringify(result.totals));
+} else {
+  console.warn("No study content was returned by the original API. Not publishing an empty snapshot; any existing valid snapshot is preserved.");
+}
 if (result.totals.failedBatches > 0) console.warn("Publishing completed batches; failed batches can be retried on the next scheduled build.");
