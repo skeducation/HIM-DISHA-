@@ -63,6 +63,7 @@ jobs:
         with:
           node-version: 20
       - name: Build original study content snapshot
+        timeout-minutes: 45
         continue-on-error: true
         run: node scripts/build-disha-content.mjs
       - name: Install dependencies
