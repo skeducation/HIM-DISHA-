@@ -171,31 +171,25 @@ const apiRows = value => {
 };
 const apiId = x => String(x?.id ?? x?.folder_id ?? x?.folderId ?? x?.chapter_id ?? x?.subject_id ?? x?.lecture_id ?? x?.file_id ?? "");
 const apiTitle = x => String(x?.title ?? x?.Title ?? x?.name ?? x?.subject_name ?? x?.topic_name ?? x?.file_name ?? "Untitled");
-async function apiGet(path) {
-  let lastError;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      const response = await fetch(DishaAPI + path, { headers: { Accept: "application/json" }, cache: "no-store" });
-      if (response.status === 429 || response.status >= 500) {
-        const error = new Error("API HTTP " + response.status);
-        if (attempt === 3) throw error;
-        await new Promise(resolve => setTimeout(resolve, Math.min(30000, 3000 * (attempt + 1))));
-        lastError = error;
-        continue;
-      }
-      if (!response.ok) throw new Error("API HTTP " + response.status);
-      const json = await response.json();
-      if (json?.success === false) throw new Error(json.error || json.message || "API error");
-      return json;
-    } catch (error) {
-      lastError = error;
-      if (attempt === 3) break;
-      if (/Failed to fetch|Load failed|NetworkError/i.test(error.message || "")) break;
-      if (!/429|5\d\d/i.test(error.message || "")) break;
-      await new Promise(resolve => setTimeout(resolve, Math.min(30000, 3000 * (attempt + 1))));
-    }
+async function apiGet(path, timeoutMs = 5500) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(DishaAPI + path, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error("API HTTP " + response.status);
+    const json = await response.json();
+    if (json?.success === false) throw new Error(json.error || json.message || "API error");
+    return json;
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("Original API timeout (" + timeoutMs + "ms)");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  throw lastError || new Error("API request failed");
 }
 async function decodeAppx(value) {
   if (!value || typeof value !== "string" || !value.includes(":") || value.startsWith("http")) return String(value || "").trim();
@@ -414,34 +408,17 @@ export default function App() {
       if (!id) throw new Error("Batch ID उपलब्ध नहीं है");
       let subjectRows = [];
       try {
-        const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }));
+        const subjectResponse = await apiGet("/api/disha/subjects?" + new URLSearchParams({ batchId: id }), 5000);
         subjectRows = apiRows(subjectResponse?.data ?? subjectResponse);
       } catch {}
       if (!subjectRows.length) subjectRows = await loadClassxSubjects(id);
-      const loadedSubjects = [];
-      for (const subject of subjectRows) {
-        const subjectId = apiId(subject);
-        if (!subjectId) continue;
-        let chapterRows = [];
-        try {
-          const chapterResponse = await apiGet("/api/disha/chapters?" + new URLSearchParams({ batchId: id, subjectId }));
-          chapterRows = apiRows(chapterResponse?.data ?? chapterResponse);
-        } catch {}
-        if (!chapterRows.length) chapterRows = await loadClassxChapters(id, subjectId);
-        const chapters = [];
-        for (const chapter of chapterRows) {
-          const chapterId = apiId(chapter);
-          if (!chapterId) continue;
-          const tree = await loadFolderTree(id, subjectId, chapterId);
-          chapters.push({ id: chapterId, title: apiTitle(chapter), ...tree });
-        }
-        loadedSubjects.push({ id: subjectId, title: apiTitle(subject), chapters });
-        setSubjects([...loadedSubjects]);
-      }
+      const loadedSubjects = subjectRows.map(subject => ({
+        id: apiId(subject), title: apiTitle(subject), chapters: [], _chaptersLoaded: false
+      })).filter(subject => subject.id);
       setSubjects(loadedSubjects);
       if (!loadedSubjects.length) setError("इस Batch के लिए API से कोई Subject नहीं मिला। Retry करें।");
     } catch (e) {
-      setError("Original Study Content API से load नहीं हुआ: " + e.message + " — Retry करें।");
+      setError("Subjects load नहीं हुए: " + e.message + " — Retry करें।");
     } finally { setResourcesLoading(false); }
   };
   const back = () => {
@@ -451,12 +428,41 @@ export default function App() {
     if (activeSubject) { setActiveSubject(null); return; }
     setActiveBatch(null); setSubjects([]); setView("home");
   };
-  const openSubject = subject => {
+  const openSubject = async subject => {
     setActiveSubject(subject); setActiveChapter(null); setFolderStack([]); setError("");
     setTab("videos");
+    if (subject?._chaptersLoaded) return;
+    setResourcesLoading(true);
+    try {
+      let chapterRows = [];
+      try {
+        const response = await apiGet("/api/disha/chapters?" + new URLSearchParams({ batchId, subjectId: subject.id }), 5000);
+        chapterRows = apiRows(response?.data ?? response);
+      } catch {}
+      if (!chapterRows.length) chapterRows = await loadClassxChapters(batchId, subject.id);
+      const chapters = chapterRows.map(chapter => ({
+        id: apiId(chapter), title: apiTitle(chapter), folders: [], videos: [], pdfs: [], _loaded: false
+      })).filter(chapter => chapter.id);
+      const updated = { ...subject, chapters, _chaptersLoaded: true };
+      setActiveSubject(updated);
+      setSubjects(current => current.map(item => item.id === subject.id ? updated : item));
+      if (!chapters.length) setError("इस Subject में chapters नहीं मिले।");
+    } catch (error) {
+      setError("Chapters load नहीं हुए: " + (error?.message || "API error"));
+    } finally { setResourcesLoading(false); }
   };
-  const openChapter = chapter => {
+  const openChapter = async chapter => {
     setActiveChapter(chapter); setFolderStack([chapter]); setTab("videos"); setError("");
+    if (chapter?._loaded) return;
+    setResourcesLoading(true);
+    try {
+      const tree = await loadFolderTree(batchId, activeSubject?.id || "", chapter.id);
+      const loaded = { ...chapter, ...tree, _loaded: true };
+      setActiveChapter(loaded);
+      setFolderStack([loaded]);
+    } catch (error) {
+      setError("Study material load नहीं हुआ: " + (error?.message || "API error"));
+    } finally { setResourcesLoading(false); }
   };
   const openFolder = async folder => {
     if (folder?._loaded) {
