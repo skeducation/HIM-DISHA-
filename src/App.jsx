@@ -135,9 +135,12 @@ async function loadClassxFolderTree(batchId, subjectId, chapterId, depth = 0, se
   if (!chapterId || depth > 10 || seen.has(String(chapterId))) return { id: chapterId, folders: [], videos: [], pdfs: [] };
   seen.add(String(chapterId));
   const response = await classxGet("/get/folder_contentsv2?course_id=" + encodeURIComponent(courseId) + "&parent_id=" + encodeURIComponent(chapterId), courseId);
-  const rows = Array.isArray(response?.data) ? response.data : [];
-  const folderRows = rows.filter(item => String(item?.material_type || "").toUpperCase() === "FOLDER");
-  const fileRows = rows.filter(item => String(item?.material_type || "").toUpperCase() !== "FOLDER");
+  const rows = Array.isArray(response?.data) ? response.data : apiRows(response?.data ?? response);
+  const materialType = item => String(item?.material_type ?? item?.type ?? item?.content_type ?? item?.file_type ?? "").trim().toUpperCase();
+  const isFolderRow = item => ["FOLDER","DIR","DIRECTORY"].includes(materialType(item));
+  const isPdfRow = item => /PDF|DOCUMENT|NOTE/.test(materialType(item)) || Boolean(first(item?.pdf_link, item?.pdf_link2, item?.pdf_url, item?.pdfUrl)) && !first(item?.video_id, item?.video_player_token, item?.asset, item?.asset_id);
+  const folderRows = rows.filter(isFolderRow);
+  const fileRows = rows.filter(item => !isFolderRow(item));
   const folders = folderRows.map(folder => ({
     id: String(folder.id || ""),
     title: String(folder.Title || folder.title || folder.name || "Folder"),
@@ -149,8 +152,7 @@ async function loadClassxFolderTree(batchId, subjectId, chapterId, depth = 0, se
   const videos = [];
   const pdfs = [];
   for (const item of fileRows) {
-    const kind = String(item?.material_type || "").toUpperCase();
-    if (kind === "PDF" || (!item?.video_id && !item?.file_link && (item?.pdf_link || item?.pdf_link2))) {
+    if (isPdfRow(item)) {
       pdfs.push(await normalizeClassxResource(item, "pdf"));
     } else {
       videos.push(await normalizeClassxResource(item, "video"));
