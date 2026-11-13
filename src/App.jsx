@@ -279,6 +279,13 @@ const listFrom = value => {
 };
 const isPdf = item => String(item?.kind || item?.type || "").toLowerCase() === "pdf" || Boolean(item?.pdfUrl || item?.pdf_url || item?.pdfKey);
 const isVideo = item => String(item?.kind || item?.type || "").toLowerCase() === "video" || Boolean(item?.streamUrl || item?.embedUrl || item?.videoId);
+function encodeAsset(id) {
+  const K = [0x4b,0x72,0x1a,0x5e,0x33,0x6d,0x0f,0x41,0x28,0x59];
+  const payload = Date.now().toString(36) + "." + String(id);
+  const bytes = [];
+  for (let i = 0; i < payload.length; i++) bytes.push(payload.charCodeAt(i) ^ K[i % K.length]);
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
 const cleanUrl = value => {
   if (typeof value !== "string") return "";
   const match = value.trim().match(/^\[(.*?)\]\((https?:\/\/[^)]+)\)$/);
@@ -481,12 +488,58 @@ export default function App() {
       setResourcesLoading(false);
     }
   };
-  const openItem = item => {
+  const openItem = async item => {
     if (isPdf(item)) {
-      const url = cleanUrl(item.pdfUrl || item.pdf_url || item.url);
-      setPlayer({ kind: "pdf", item, url, downloadUrl: cleanUrl(item.downloadUrl || item.download_url || url) });
-    } else {
-      setPlayer({ kind: "video", item, url: cleanUrl(item.embedUrl || item.embed_url || item.streamUrl || item.stream_url || (item.videoId ? "https://www.youtube.com/embed/" + item.videoId : "")), downloadUrl: cleanUrl(item.downloadUrl || item.download_url || "") });
+      setPlayer({ kind: "pdf", item, url: "", downloadUrl: "", loading: true });
+      try {
+        let url = cleanUrl(item.pdfUrl || item.pdf_url || item.pdf_link || item.pdf_link2 || item.url || item.downloadUrl || item.download_url);
+        if (!/^https?:\/\//i.test(url)) {
+          const folderId = String(first(currentFolder?.id, activeChapter?.id, ""));
+          if (!folderId || !item.title) throw new Error("PDF का folder ID या title उपलब्ध नहीं है");
+          const params = new URLSearchParams({ folder: folderId, title: String(item.title) });
+          const response = await fetch("https://tik-reels.vercel.app/api/pdf?" + params, {
+            headers: { Accept: "application/json" },
+            signal: AbortSignal.timeout(15000),
+            cache: "no-store"
+          });
+          const data = await response.json().catch(() => null);
+          if (!response.ok || data?.ok !== true || !/^https?:\/\//i.test(String(data?.url || ""))) {
+            throw new Error(data?.message || "Original PDF provider से valid link नहीं मिला");
+          }
+          url = cleanUrl(data.url);
+        }
+        if (!/^https?:\/\//i.test(url)) throw new Error("PDF URL उपलब्ध नहीं है");
+        setPlayer({ kind: "pdf", item, url, downloadUrl: cleanUrl(item.downloadUrl || item.download_url || url), loading: false });
+      } catch (error) {
+        setPlayer({ kind: "pdf", item, url: "", downloadUrl: "", loading: false, error: error?.message || "PDF load नहीं हुआ" });
+      }
+      return;
+    }
+    const asset = first(item?.asset, item?.asset_id, item?.assetId);
+    let url = asset
+      ? "https://targetboard.co.in/dashboard/video?v=" + encodeURIComponent(encodeAsset(asset))
+      : cleanUrl(item.embedUrl || item.embed_url || item.playerUrl || item.player_url || item.streamUrl || item.stream_url || (item.videoId ? "https://www.youtube.com/embed/" + item.videoId + "?playsinline=1&rel=0" : ""));
+    if (!url && item?.video_player_token && String(item.video_player_token) !== "1234") {
+      url = "https://appx-play.classx.co.in/combined-img-player?isMobile=true&token=" + encodeURIComponent(String(item.video_player_token));
+    }
+    setPlayer({ kind: "video", item, url, downloadUrl: cleanUrl(item.downloadUrl || item.download_url || "") });
+  };
+  const downloadPdf = async () => {
+    if (!player?.url) return;
+    try {
+      const response = await fetch(player.url, { signal: AbortSignal.timeout(20000) });
+      if (!response.ok) throw new Error("PDF download HTTP " + response.status);
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = (title(player.item) || "study-material") + ".pdf";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+    } catch {
+      window.open(player.url, "_blank", "noopener,noreferrer");
     }
   };
   const subjectsCount = subjects.length;
@@ -599,8 +652,8 @@ export default function App() {
     {player && <div className="viewer-overlay open" onClick={event => { if (event.target === event.currentTarget) setPlayer(null); }}>
       <section className="viewer-dialog" role="dialog" aria-modal="true">
         <header className="viewer-header"><b className="viewer-title">{title(player.item)}</b><button className="viewer-close" onClick={() => setPlayer(null)} aria-label="Close">✕</button></header>
-        {player.kind === "pdf" ? (player.url ? <iframe className="viewer-frame" title="PDF viewer" src={player.url} /> : <div className="empty">इस PDF का valid URL API ने नहीं दिया।</div>) : player.url ? (/\.m3u8|\.mp4|\.webm/i.test(player.url) ? <video className="viewer-frame" controls playsInline src={player.url} /> : <iframe className="viewer-frame" title="Video player" src={player.url} allow="autoplay; fullscreen; picture-in-picture" allowFullScreen />) : <div className="empty">इस video का playback URL उपलब्ध नहीं है।</div>}
-        {player.kind === "pdf" && player.url && <div className="viewer-header"><a href={player.url} target="_blank" rel="noreferrer">Open PDF ↗</a><a href={player.downloadUrl || player.url} target="_blank" rel="noreferrer" download>Download PDF ↓</a></div>}
+        {player.kind === "pdf" ? (player.loading ? <div className="empty">Original PDF link लोड हो रहा है…</div> : player.url ? <iframe className="viewer-frame" title="PDF viewer" src={player.url} /> : <div className="empty">{player.error || "इस PDF का valid URL API ने नहीं दिया।"}</div>) : player.url ? (/\.m3u8|\.mp4|\.webm/i.test(player.url) ? <video className="viewer-frame" controls playsInline src={player.url} /> : <iframe className="viewer-frame" title="Video player" src={player.url} allow="autoplay; fullscreen; picture-in-picture" allowFullScreen />) : <div className="empty">इस video का playback URL उपलब्ध नहीं है।</div>}
+        {player.kind === "pdf" && player.url && <div className="viewer-header"><a href={player.url} target="_blank" rel="noreferrer">Open PDF ↗</a><button type="button" onClick={downloadPdf}>Download PDF ↓</button></div>}
         {player.kind === "video" && player.downloadUrl && <div className="viewer-header"><a href={player.downloadUrl} target="_blank" rel="noreferrer" download>Download original video ↓</a></div>}
       </section>
     </div>}
