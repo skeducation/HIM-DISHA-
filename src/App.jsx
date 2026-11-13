@@ -190,7 +190,8 @@ async function apiGet(path) {
     } catch (error) {
       lastError = error;
       if (attempt === 3) break;
-      if (!/429|5\d\d|fetch/i.test(error.message || "")) break;
+      if (/Failed to fetch|Load failed|NetworkError/i.test(error.message || "")) break;
+      if (!/429|5\d\d/i.test(error.message || "")) break;
       await new Promise(resolve => setTimeout(resolve, Math.min(30000, 3000 * (attempt + 1))));
     }
   }
