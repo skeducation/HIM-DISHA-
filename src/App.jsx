@@ -355,7 +355,24 @@ export default function App() {
       setBatches(rows);
       if (!rows.length) setError("अभी API से कोई Batch उपलब्ध नहीं है। Retry करें।");
     } catch (snapshotError) {
-      setError("Batch list load नहीं हुई: " + (snapshotError?.message || "Snapshot unavailable"));
+      try {
+        const classx = await classxGet("/get/courselistnewv2?exam_name=&start=-1&userid=0");
+        const rows = (Array.isArray(classx?.data) ? classx.data : [])
+          .filter(item => String(item?.type || "COURSE").toUpperCase() === "COURSE" && item?.id)
+          .map(item => ({
+            id: String(item.id),
+            name: String(item.course_name || item.name || "Untitled"),
+            title: String(item.course_name || item.name || "Untitled"),
+            thumbnail: item.course_thumbnail || item.thumbnail || "",
+            description: item.course_description || "",
+            validity: item.validity || "12 Months",
+            group: item.class || item.exam_name || item.category || ""
+          }));
+        setBatches(rows);
+        if (!rows.length) setError("अभी API से कोई Batch उपलब्ध नहीं है। Retry करें।");
+      } catch (classxError) {
+        setError("Batch list load नहीं हुई: " + (classxError?.message || snapshotError?.message || "API unavailable"));
+      }
     } finally { setLoading(false); }
   };
 
