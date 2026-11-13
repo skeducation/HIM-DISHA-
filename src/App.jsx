@@ -244,10 +244,17 @@ async function loadFolderTree(batchId, subjectId, chapterId, depth = 0, seen = n
   try {
     const q = new URLSearchParams({ batchId, subjectId, chapterId });
     const response = await apiGet("/api/disha/lectures?" + q);
-    const data = response?.data && typeof response.data === "object" ? response.data : response;
-    const videosRaw = Array.isArray(response?.lectures) ? response.lectures : apiRows(data?.lectures);
-    const pdfsRaw = Array.isArray(response?.pdfs) ? response.pdfs : apiRows(data?.pdfs);
-    const children = Array.isArray(response?.subFolders) ? response.subFolders : apiRows(data?.subFolders);
+    const data = response?.data && typeof response.data === "object" && !Array.isArray(response.data) ? response.data : response;
+    const flatRows = Array.isArray(response?.data) ? response.data : apiRows(response?.data ?? response);
+    const materialType = item => String(item?.material_type ?? item?.type ?? item?.content_type ?? item?.file_type ?? "").trim().toUpperCase();
+    const isFolderRow = item => ["FOLDER","DIR","DIRECTORY"].includes(materialType(item));
+    const isPdfRow = item => /PDF|DOCUMENT|NOTE/.test(materialType(item)) || Boolean(first(item?.pdf_link, item?.pdf_link2, item?.pdf_url, item?.pdfUrl)) && !first(item?.video_id, item?.video_player_token, item?.asset, item?.asset_id);
+    const explicitVideos = Array.isArray(response?.lectures) ? response.lectures : apiRows(data?.lectures);
+    const explicitPdfs = Array.isArray(response?.pdfs) ? response.pdfs : apiRows(data?.pdfs);
+    const explicitFolders = Array.isArray(response?.subFolders) ? response.subFolders : apiRows(data?.subFolders);
+    const videosRaw = explicitVideos.length ? explicitVideos : flatRows.filter(item => !isFolderRow(item) && !isPdfRow(item));
+    const pdfsRaw = explicitPdfs.length ? explicitPdfs : flatRows.filter(isPdfRow);
+    const children = explicitFolders.length ? explicitFolders : flatRows.filter(isFolderRow);
     if (videosRaw.length || pdfsRaw.length || children.length) {
       const folders = children.map(child => ({
         id: apiId(child),
